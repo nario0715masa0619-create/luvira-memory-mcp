@@ -160,6 +160,23 @@ Remove it without stopping containers or deleting data:
 .\scripts\windows\register-bootstrap-task.ps1 -Unregister
 ```
 
+## Codex CLI
+
+Codex uses the native Streamable HTTP MCP configuration for `luvira_memory`.
+Keep `LUVIRA_MCP_API_KEY` in this repository's ignored `.env`, and launch Codex
+through the Windows launcher instead of invoking `codex` directly:
+
+```powershell
+.\scripts\windows\start-codex.ps1
+```
+
+Normal Codex arguments are forwarded, for example
+`.\scripts\windows\start-codex.ps1 mcp list`. The launcher reads only
+`LUVIRA_MCP_API_KEY`, adds it to the child process environment, and removes it
+from the launcher environment after Codex exits. It does not persist User or
+Machine environment variables and does not put the credential in Codex
+arguments or `config.toml`.
+
 ## Memory E2E verification
 
 After `/readyz` succeeds, initialize `luvira-memory` from LibreChat and confirm
