@@ -1,0 +1,8 @@
+# Set LUVIRA_MCP_API_KEY in the environment that launches Codex.
+[mcp_servers.luvira_memory]
+url = "http://127.0.0.1:8765/mcp"
+bearer_token_env_var = "LUVIRA_MCP_API_KEY"
+required = true
+startup_timeout_sec = 10
+tool_timeout_sec = 60
+default_tools_approval_mode = "writes"

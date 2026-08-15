@@ -1,0 +1,14 @@
+# Merge these sections into LibreChat's untracked/deployment configuration.
+mcpSettings:
+  allowedAddresses:
+    - 'host.docker.internal:8765'
+
+mcpServers:
+  luvira-memory:
+    type: streamable-http
+    url: http://host.docker.internal:8765/mcp
+    headers:
+      Authorization: 'Bearer ${LUVIRA_MCP_API_KEY}'
+    timeout: 60000
+    serverInstructions: true
+    requiresOAuth: false
