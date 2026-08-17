@@ -359,3 +359,194 @@ describe("MemoryService governance audit wiring (Phase 3A)", () => {
     expect(client.add).toHaveBeenCalledTimes(20);
   });
 });
+
+describe("MemoryService classification / provenance governance (Phase 4)", () => {
+  it("audits UNCLASSIFIED and keeps existing write behavior when no governance fields are given", async () => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await service.add({ messages: [{ role: "user", content: "plain note" }] });
+
+    expect(audit.events[0]?.classification).toBe("UNCLASSIFIED");
+    expect(client.add).toHaveBeenCalledWith({
+      messages: [{ role: "user", content: "plain note" }],
+      user_id: userId,
+    });
+  });
+
+  it("records the caller-declared classification in the audit event", async () => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await service.add({ messages: [{ role: "user", content: "note" }], classification: "PROJECT_FACT" });
+
+    expect(audit.events[0]?.classification).toBe("PROJECT_FACT");
+  });
+
+  it("records the caller-declared source_type in the audit event", async () => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await service.add({ messages: [{ role: "user", content: "note" }], source_type: "USER_EXPLICIT" });
+
+    expect(audit.events[0]?.sourceType).toBe("USER_EXPLICIT");
+  });
+
+  it("maps explicit_user_request=true to WriteIntent EXPLICIT_REPORTED", async () => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await service.add({ messages: [{ role: "user", content: "note" }], explicit_user_request: true });
+
+    expect(audit.events[0]?.writeIntent).toBe("EXPLICIT_REPORTED");
+  });
+
+  it("maps explicit_user_request=false to WriteIntent IMPLICIT", async () => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await service.add({ messages: [{ role: "user", content: "note" }], explicit_user_request: false });
+
+    expect(audit.events[0]?.writeIntent).toBe("IMPLICIT");
+  });
+
+  it("omits writeIntent entirely when explicit_user_request is not supplied", async () => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await service.add({ messages: [{ role: "user", content: "note" }] });
+
+    expect(audit.events[0]).not.toHaveProperty("writeIntent");
+  });
+
+  it("preserves source_project and source_client as provenance in the audit event", async () => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await service.add({
+      messages: [{ role: "user", content: "note" }],
+      source_project: "luvira-memory-mcp",
+      source_client: "claude-code",
+    });
+
+    expect(audit.events[0]?.sourceProject).toBe("luvira-memory-mcp");
+    expect(audit.events[0]?.sourceClient).toBe("claude-code");
+  });
+
+  it("injects canonical classification and authority into the Mem0-bound metadata", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.add({
+      messages: [{ role: "user", content: "note" }],
+      classification: "LONG_TERM_KNOWLEDGE",
+      metadata: { note: "caller value" },
+    });
+
+    expect(client.add).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: { note: "caller value", classification: "LONG_TERM_KNOWLEDGE", authority: "supplemental" },
+    }));
+  });
+
+  it("lets the Gateway-computed authority/classification win over a caller metadata key of the same name", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.add({
+      messages: [{ role: "user", content: "note" }],
+      classification: "PROJECT_FACT",
+      metadata: { authority: "approved", classification: "SOMETHING_ELSE" },
+    });
+
+    expect(client.add).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: { authority: "supplemental", classification: "PROJECT_FACT" },
+    }));
+  });
+
+  it("still runs pattern-based secret detection regardless of a benign declared classification", async () => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await expect(
+      service.add({
+        messages: [{ role: "user", content: "ghp_1234567890abcdefghijklmnopqrstuvwxyz" }],
+        classification: "USER_PREFERENCE",
+      }),
+    ).rejects.toMatchObject({ code: "secret_detected_high_confidence" } satisfies Partial<GatewayError>);
+    expect(client.add).not.toHaveBeenCalled();
+    expect(audit.events[0]).toMatchObject({ decision: "BLOCK", reasonCodes: ["secret_detected_high_confidence"] });
+  });
+
+  it.each(["SECRET", "CUSTOMER_CONFIDENTIAL"] as const)(
+    "blocks a self-declared %s classification even with otherwise-safe content, and calls upstream add zero times",
+    async (classification) => {
+      const client = mockClient();
+      const audit = mockAuditSink();
+      const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+      await expect(
+        service.add({ messages: [{ role: "user", content: "ordinary safe text" }], classification }),
+      ).rejects.toMatchObject({ code: "classification_restricted" } satisfies Partial<GatewayError>);
+
+      expect(client.add).not.toHaveBeenCalled();
+      expect(audit.events[0]).toMatchObject({
+        decision: "BLOCK",
+        classification,
+        reasonCodes: ["classification_restricted"],
+      });
+      expect(audit.events[0]).not.toHaveProperty("contentHash");
+    },
+  );
+
+  it("blocks a self-declared SECRET classification on update and calls upstream get/update zero times", async () => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await expect(
+      service.update("owned", { text: "ordinary safe text", classification: "SECRET" }),
+    ).rejects.toMatchObject({ code: "classification_restricted" } satisfies Partial<GatewayError>);
+
+    expect(client.get).not.toHaveBeenCalled();
+    expect(client.update).not.toHaveBeenCalled();
+  });
+
+  it("does not reject a caller metadata key that shares a name with a governance field (Decision B)", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await expect(
+      service.add({
+        messages: [{ role: "user", content: "note" }],
+        metadata: { source_type: "integration_test", authority: "supplemental", test_run: "abc" },
+      }),
+    ).resolves.toBeDefined();
+    expect(client.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("still fails closed on AuditSink failure even when governance fields are present", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), failingAuditSink());
+    await expect(
+      service.add({
+        messages: [{ role: "user", content: "note" }],
+        classification: "WORKFLOW_STATE",
+        source_client: "codex",
+      }),
+    ).rejects.toMatchObject({ code: "governance_audit_unavailable" } satisfies Partial<GatewayError>);
+    expect(client.add).not.toHaveBeenCalled();
+  });
+
+  it("does not persist governance metadata into Mem0 metadata for update when the caller did not touch metadata", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.update("owned", { text: "new text", classification: "PROJECT_FACT" });
+
+    expect(client.update).toHaveBeenCalledWith("owned", { text: "new text" });
+  });
+
+  it("injects governance metadata into Mem0 metadata for update when the caller already sends metadata", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.update("owned", { metadata: { note: "x" }, classification: "PROJECT_FACT" });
+
+    expect(client.update).toHaveBeenCalledWith("owned", {
+      metadata: { note: "x", classification: "PROJECT_FACT", authority: "supplemental" },
+    });
+  });
+});

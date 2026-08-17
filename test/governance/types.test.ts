@@ -49,6 +49,8 @@ const sampleAuditEvent: GovernanceAuditEvent = {
   scopeFingerprint: "fingerprint",
   sourceType: "USER_EXPLICIT",
   writeIntent: "EXPLICIT_REPORTED",
+  sourceProject: "luvira-memory-mcp",
+  sourceClient: "claude-code",
 };
 
 const FORBIDDEN_AUDIT_FIELD_PATTERN = /text|content$|raw|credential|secret|password|authorization|token/i;

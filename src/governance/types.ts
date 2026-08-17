@@ -1,11 +1,13 @@
 /**
  * Canonical Memory Write Governance type model.
  *
- * Phase 1 scope only: this module defines types. Nothing in this file is
- * imported by the runtime write path (`tools.ts`, `memory-service.ts`,
- * `mem0-client.ts`) yet, and none of these types are exposed through the MCP
- * tool schema. Defining a type here does not enable any enforcement,
- * detection, or audit behavior — those are later phases.
+ * As of Phase 4, this is no longer types-only: `secret-detection.ts` (Phase
+ * 3) and `memory-service.ts` (Phase 3A/4) both import and act on these
+ * types, and `MemoryClassification` / `MemorySourceType` are now exposed
+ * (as a restricted, validated subset — see `tools.ts`) through the
+ * `memory_add` / `memory_update` MCP input schema. Defining a type here
+ * still does not by itself activate enforcement beyond what each phase's
+ * code explicitly wires up.
  *
  * Two invariants drove every type below and must be preserved by future
  * changes:
@@ -118,6 +120,15 @@ export type GovernanceDecision = "ALLOW" | "BLOCK" | "REVIEW_REQUIRED";
 export type GovernanceReasonCode =
   // Classification (Phase 3+)
   | "classification_unknown"
+  // Classification-declared restriction (Phase 4): the caller's own
+  // `classification` input was SECRET or CUSTOMER_CONFIDENTIAL. This is a
+  // minimal, unconditional safety exception carried over from the approved
+  // Architecture Resolution — not the start of risk-tiered Automation
+  // Policy (that remains a later phase). Distinct from
+  // `secret_detected_high_confidence` because the trigger here is the
+  // caller's self-declaration, not pattern-based content detection; audit
+  // readers should be able to tell the two apart.
+  | "classification_restricted"
   // Secret detection (Phase 3, AR-4)
   | "secret_detected_high_confidence"
   | "secret_suspected_review_required"
@@ -222,4 +233,8 @@ export interface GovernanceAuditEvent {
   readonly scopeFingerprint: string;
   readonly sourceType?: MemorySourceType;
   readonly writeIntent?: WriteIntent;
+  /** Provenance only (Phase 4) — never a policy-branching input. See {@link GovernanceContext}. */
+  readonly sourceProject?: string;
+  /** Provenance only (Phase 4) — never a policy-branching input. See {@link GovernanceContext}. */
+  readonly sourceClient?: string;
 }

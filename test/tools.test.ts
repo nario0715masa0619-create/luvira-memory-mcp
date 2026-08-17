@@ -89,3 +89,145 @@ describe("MCP tools", () => {
     expect(service.update).not.toHaveBeenCalled();
   });
 });
+
+describe("Classification / Provenance input (Phase 4)", () => {
+  it("accepts existing memory_add input with no governance fields, unchanged", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_add",
+      arguments: { messages: [{ role: "user", content: "hello" }] },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(service.add).toHaveBeenCalledWith({ messages: [{ role: "user", content: "hello" }] });
+  });
+
+  it("accepts existing memory_update input with no governance fields, unchanged", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_update",
+      arguments: { memory_id: "1", text: "updated" },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(service.update).toHaveBeenCalledWith("1", { text: "updated" });
+  });
+
+  it("accepts a valid classification on memory_add", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_add",
+      arguments: { messages: [{ role: "user", content: "hello" }], classification: "PROJECT_FACT" },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(service.add).toHaveBeenCalledWith(
+      expect.objectContaining({ classification: "PROJECT_FACT" }),
+    );
+  });
+
+  it("rejects an invalid classification on memory_add before service execution", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_add",
+      arguments: { messages: [{ role: "user", content: "hello" }], classification: "NOT_A_REAL_VALUE" },
+    });
+    expect(result.isError).toBe(true);
+    expect(service.add).not.toHaveBeenCalled();
+  });
+
+  it.each(["UNCLASSIFIED", "LEGACY_UNKNOWN"])(
+    "rejects the internal-only classification value %s from external callers",
+    async (value) => {
+      const { client, service } = await connected();
+      const result = await client.callTool({
+        name: "memory_add",
+        arguments: { messages: [{ role: "user", content: "hello" }], classification: value },
+      });
+      expect(result.isError).toBe(true);
+      expect(service.add).not.toHaveBeenCalled();
+    },
+  );
+
+  it("accepts a valid source_type on memory_add", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_add",
+      arguments: { messages: [{ role: "user", content: "hello" }], source_type: "USER_EXPLICIT" },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(service.add).toHaveBeenCalledWith(expect.objectContaining({ source_type: "USER_EXPLICIT" }));
+  });
+
+  it("rejects an invalid source_type on memory_add before service execution", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_add",
+      arguments: { messages: [{ role: "user", content: "hello" }], source_type: "NOT_A_REAL_VALUE" },
+    });
+    expect(result.isError).toBe(true);
+    expect(service.add).not.toHaveBeenCalled();
+  });
+
+  it("rejects the internal-only source_type value LEGACY_UNKNOWN from external callers", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_add",
+      arguments: { messages: [{ role: "user", content: "hello" }], source_type: "LEGACY_UNKNOWN" },
+    });
+    expect(result.isError).toBe(true);
+    expect(service.add).not.toHaveBeenCalled();
+  });
+
+  it("accepts explicit_user_request as a boolean on memory_add", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_add",
+      arguments: { messages: [{ role: "user", content: "hello" }], explicit_user_request: true },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(service.add).toHaveBeenCalledWith(expect.objectContaining({ explicit_user_request: true }));
+  });
+
+  it("accepts an optional source_project on memory_add", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_add",
+      arguments: { messages: [{ role: "user", content: "hello" }], source_project: "luvira-memory-mcp" },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(service.add).toHaveBeenCalledWith(expect.objectContaining({ source_project: "luvira-memory-mcp" }));
+  });
+
+  it("accepts an optional source_client on memory_add", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_add",
+      arguments: { messages: [{ role: "user", content: "hello" }], source_client: "claude-code" },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(service.add).toHaveBeenCalledWith(expect.objectContaining({ source_client: "claude-code" }));
+  });
+
+  it("accepts classification and provenance fields on memory_update", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_update",
+      arguments: {
+        memory_id: "1",
+        text: "updated",
+        classification: "WORKFLOW_STATE",
+        source_client: "codex",
+      },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(service.update).toHaveBeenCalledWith(
+      "1",
+      expect.objectContaining({ text: "updated", classification: "WORKFLOW_STATE", source_client: "codex" }),
+    );
+  });
+
+  it("does not require a client-specific tool name or enum for source_client", async () => {
+    const { client } = await connected();
+    const listed = await client.listTools();
+    const addSchema = JSON.stringify(listed.tools.find((tool) => tool.name === "memory_add")?.inputSchema);
+    expect(addSchema).not.toMatch(/"enum":\s*\[\s*"(claude-code|codex|librechat|kimi-code)"/i);
+  });
+});

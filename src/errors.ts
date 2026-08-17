@@ -15,7 +15,11 @@ export type GatewayErrorCode =
   // be persisted to the AuditSink. Write is fail-closed in this case —
   // Mem0 is never called, regardless of whether the decision itself would
   // have been ALLOW or BLOCK.
-  | "governance_audit_unavailable";
+  | "governance_audit_unavailable"
+  // Memory Write Governance (Phase 4): the caller declared classification
+  // SECRET or CUSTOMER_CONFIDENTIAL. Minimal safety exception, not
+  // risk-tiered Automation Policy — see memory-service.ts.
+  | "classification_restricted";
 
 export class GatewayError extends Error {
   constructor(

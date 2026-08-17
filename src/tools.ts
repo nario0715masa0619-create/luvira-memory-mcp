@@ -10,6 +10,44 @@ export const AUTHORITY_NOTICE =
 const memoryId = z.string().trim().min(1).max(512);
 const expirationDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Expected YYYY-MM-DD");
 const metadata = z.record(z.unknown());
+
+// Memory Write Governance (Phase 4): Classification / Provenance input.
+// `UNCLASSIFIED` and `LEGACY_UNKNOWN` are intentionally excluded — they are
+// internal-only states (the default for an unspecified classification, and
+// a read-time interpretation of pre-Phase-4 Memory) that a caller declaring
+// a *new* write has no reason to assert directly.
+const CLASSIFICATION_DESCRIPTION =
+  "What kind of content this is. A client assertion, not verified fact — the Gateway does not confirm it. Memory authority is always supplemental regardless of this value; no classification, including ORGANIZATION_POLICY or PROJECT_DECISION, promotes a Memory to Canonical/Approved status.";
+const classification = z.enum([
+  "USER_PREFERENCE", "USER_DECISION", "ORGANIZATION_POLICY", "PROJECT_DECISION",
+  "PROJECT_FACT", "WORKFLOW_STATE", "LONG_TERM_KNOWLEDGE", "TEMPORARY_CONTEXT",
+  "EXTERNAL_UNTRUSTED", "SECRET", "CUSTOMER_CONFIDENTIAL",
+]).describe(CLASSIFICATION_DESCRIPTION);
+
+const SOURCE_TYPE_DESCRIPTION =
+  "Where this write is reported to have originated. A client-reported assertion, not verified fact.";
+const sourceType = z.enum(["USER_EXPLICIT", "AI_IMPLICIT", "EXTERNAL_UNTRUSTED", "SYSTEM"]).describe(SOURCE_TYPE_DESCRIPTION);
+
+const EXPLICIT_USER_REQUEST_DESCRIPTION =
+  "The calling client reports that a user explicitly asked for this write (e.g. \"remember this\"). This is a client-reported assertion only — it does NOT mean the Gateway verified human approval.";
+const explicitUserRequest = z.boolean().describe(EXPLICIT_USER_REQUEST_DESCRIPTION);
+
+const SOURCE_PROJECT_DESCRIPTION =
+  "Free-form project provenance for later audit/explanation. Provenance only — this does NOT provide project isolation; it is never used for retrieval filtering, scope resolution, or authorization.";
+const sourceProject = z.string().trim().min(1).max(200).describe(SOURCE_PROJECT_DESCRIPTION);
+
+const SOURCE_CLIENT_DESCRIPTION =
+  "Free-form client provenance for later audit/explanation (e.g. \"claude-code\", \"codex\"). Provenance only — the Gateway core never branches behavior on this value.";
+const sourceClient = z.string().trim().min(1).max(100).describe(SOURCE_CLIENT_DESCRIPTION);
+
+const governanceWriteFields = {
+  classification: classification.optional(),
+  source_type: sourceType.optional(),
+  explicit_user_request: explicitUserRequest.optional(),
+  source_project: sourceProject.optional(),
+  source_client: sourceClient.optional(),
+};
+
 const commonOutput = {
   ok: z.boolean(),
   data: z.unknown().optional(),
@@ -27,7 +65,7 @@ export function createMcpServer(service: MemoryService): McpServer {
   server.registerTool(
     "memory_add",
     {
-      description: `Store messages through the canonical Mem0 memory engine. Mem0 may infer, merge, update, or remove memories when inference is enabled. ${AUTHORITY_NOTICE}`,
+      description: `Store messages through the canonical Mem0 memory engine. Mem0 may infer, merge, update, or remove memories when inference is enabled. Optional classification/provenance fields are client assertions only, never verified approval or Canonical Authority. ${AUTHORITY_NOTICE}`,
       inputSchema: {
         messages: z.array(z.object({
           role: z.enum(["user", "assistant"]),
@@ -37,6 +75,7 @@ export function createMcpServer(service: MemoryService): McpServer {
         expiration_date: expirationDate.optional(),
         infer: z.boolean().optional(),
         memory_type: z.string().trim().min(1).max(128).optional(),
+        ...governanceWriteFields,
       },
       outputSchema: commonOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
@@ -74,12 +113,13 @@ export function createMcpServer(service: MemoryService): McpServer {
   server.registerTool(
     "memory_update",
     {
-      description: `Update one memory only after trusted-scope ownership verification. ${AUTHORITY_NOTICE}`,
+      description: `Update one memory only after trusted-scope ownership verification. Optional classification/provenance fields are client assertions only, never verified approval or Canonical Authority. ${AUTHORITY_NOTICE}`,
       inputSchema: {
         memory_id: memoryId,
         text: z.string().trim().min(1).max(100_000).nullable().optional(),
         metadata: metadata.nullable().optional(),
         expiration_date: expirationDate.nullable().optional(),
+        ...governanceWriteFields,
       },
       outputSchema: commonOutput,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
