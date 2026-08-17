@@ -23,6 +23,7 @@ const config: AppConfig = {
     apiKey: "gateway-secret",
     allowedOrigins: new Set(["http://localhost:3080"]),
   },
+  governance: { auditPath: "unused-in-this-test.jsonl" },
 };
 
 function serviceMock(): MemoryService {

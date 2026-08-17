@@ -16,6 +16,13 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:8765:8765"
+    volumes:
+      # Governance audit events (logs/governance-audit.jsonl) must survive
+      # container recreation. Without this bind mount they would only exist
+      # on the container's ephemeral filesystem. This reuses the existing
+      # host-side, git-ignored `logs/` directory already used by the
+      # Windows bootstrap task.
+      - ./logs:/app/logs
     healthcheck:
       test:
         - CMD

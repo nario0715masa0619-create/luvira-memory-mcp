@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
+import { JsonlAuditSink } from "../../src/governance/audit-sink.js";
 import { Mem0Client } from "../../src/mem0-client.js";
 import { MemoryService } from "../../src/memory-service.js";
 import { StaticScopeResolver, scopeToMem0UserId } from "../../src/scope.js";
@@ -17,7 +22,9 @@ integration("running self-hosted Mem0", () => {
     apiKey,
     timeoutMs: 60_000,
   });
-  const service = new MemoryService(client, new StaticScopeResolver(scope));
+  const auditDir = mkdtempSync(join(tmpdir(), "luvira-integration-audit-"));
+  const auditSink = new JsonlAuditSink(join(auditDir, "audit.jsonl"));
+  const service = new MemoryService(client, new StaticScopeResolver(scope), auditSink);
   const createdIds = new Set<string>();
   const marker = `luvira-integration-${suffix}`;
 
@@ -29,6 +36,7 @@ integration("running self-hosted Mem0", () => {
         // The main test may already have deleted it. Never delete anything not created in this run.
       }
     }
+    await rm(auditDir, { recursive: true, force: true });
   });
 
   it("performs add, search, owned get, update, and delete in an isolated scope", async () => {
