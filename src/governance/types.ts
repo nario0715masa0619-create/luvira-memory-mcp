@@ -129,10 +129,18 @@ export type GovernanceReasonCode =
   // caller's self-declaration, not pattern-based content detection; audit
   // readers should be able to tell the two apart.
   | "classification_restricted"
+  // Automation Policy (Memory Governance MVP): classification × WriteIntent
+  // required an explicit-reported write and did not get one. Distinct from
+  // `classification_restricted` (an absolute, content-blind block) and from
+  // `approval_channel_unavailable` (reserved for a future verified approval
+  // channel — not used for this deterministic, no-channel-needed check).
+  | "automation_policy_restricted"
   // Secret detection (Phase 3, AR-4)
   | "secret_detected_high_confidence"
   | "secret_suspected_review_required"
-  // Mem0 `infer` governance (Phase 5, AR-1)
+  // Mem0 `infer` governance (Memory Governance MVP, AR-1): `infer=true`
+  // lets Mem0 opaquely merge/update/remove memories server-side, bypassing
+  // Gateway audit-before-mutation. Blocked unconditionally in the MVP.
   | "opaque_upstream_mutation_not_allowed"
   | "opaque_upstream_mutation_possible"
   // Approval boundary (Phase 6-7, AR-2) — no trusted approval channel

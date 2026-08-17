@@ -231,3 +231,32 @@ describe("Classification / Provenance input (Phase 4)", () => {
     expect(addSchema).not.toMatch(/"enum":\s*\[\s*"(claude-code|codex|librechat|kimi-code)"/i);
   });
 });
+
+describe("memory_delete explicit_user_request (Memory Governance MVP, Section 10)", () => {
+  it("accepts existing memory_delete input with no explicit_user_request, unchanged", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({ name: "memory_delete", arguments: { memory_id: "1" } });
+    expect(result.isError).not.toBe(true);
+    expect(service.delete).toHaveBeenCalledWith("1", { explicitUserRequest: undefined });
+  });
+
+  it("passes explicit_user_request=true through to the service", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_delete",
+      arguments: { memory_id: "1", explicit_user_request: true },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(service.delete).toHaveBeenCalledWith("1", { explicitUserRequest: true });
+  });
+
+  it("rejects a non-boolean explicit_user_request before service execution", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_delete",
+      arguments: { memory_id: "1", explicit_user_request: "yes" },
+    });
+    expect(result.isError).toBe(true);
+    expect(service.delete).not.toHaveBeenCalled();
+  });
+});

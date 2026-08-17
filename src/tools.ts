@@ -135,12 +135,15 @@ export function createMcpServer(service: MemoryService): McpServer {
   server.registerTool(
     "memory_delete",
     {
-      description: `Permanently delete one memory only after trusted-scope ownership verification. ${AUTHORITY_NOTICE}`,
-      inputSchema: { memory_id: memoryId },
+      description: `Permanently delete one memory only after trusted-scope ownership verification. A memory whose stored classification represents a human decision (USER_DECISION, ORGANIZATION_POLICY, PROJECT_DECISION) requires explicit_user_request=true. ${AUTHORITY_NOTICE}`,
+      inputSchema: { memory_id: memoryId, explicit_user_request: explicitUserRequest.optional() },
       outputSchema: commonOutput,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
     },
-    async ({ memory_id }) => execute(() => service.delete(memory_id), "Memory delete completed"),
+    async ({ memory_id, explicit_user_request }) => execute(
+      () => service.delete(memory_id, { explicitUserRequest: explicit_user_request }),
+      "Memory delete completed",
+    ),
   );
 
   return server;

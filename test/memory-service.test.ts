@@ -232,11 +232,28 @@ describe("MemoryService governance audit wiring (Phase 3A)", () => {
     expect(client.add).not.toHaveBeenCalled();
   });
 
-  it("fails closed on AuditSink failure for a safe update: upstream get/update are never called", async () => {
+  it("fails closed on AuditSink failure for a safe update: upstream get is read (Automation Policy needs existing classification) but update is never called", async () => {
+    // Memory Governance MVP (Section 9): UPDATE's Automation Policy decision
+    // must consider the target Memory's *existing* classification, which
+    // requires the ownership read (getOwned) to happen before the single
+    // audit record for this call. This is a deliberate, minimal change from
+    // the Phase 3A shape of this test — the mutation-zero and fail-closed
+    // guarantees below are unchanged; only "no Mem0 call happens at all"
+    // narrows to "no Mem0 *write* happens".
     const client = mockClient();
     const service = new MemoryService(client, new StaticScopeResolver(scope), failingAuditSink());
     await expect(
       service.update("owned", { text: "safe update" }),
+    ).rejects.toMatchObject({ code: "governance_audit_unavailable" } satisfies Partial<GatewayError>);
+    expect(client.get).toHaveBeenCalledTimes(1);
+    expect(client.update).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on AuditSink failure for an early-blocked update (secret content): upstream get/update are never called", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), failingAuditSink());
+    await expect(
+      service.update("owned", { text: FAKE_GITHUB_TOKEN }),
     ).rejects.toMatchObject({ code: "governance_audit_unavailable" } satisfies Partial<GatewayError>);
     expect(client.get).not.toHaveBeenCalled();
     expect(client.update).not.toHaveBeenCalled();
@@ -340,12 +357,13 @@ describe("MemoryService governance audit wiring (Phase 3A)", () => {
     expect(audit.record).not.toHaveBeenCalled();
   });
 
-  it("does not call the AuditSink for delete (no governance rule exists for delete yet)", async () => {
+  it("calls the AuditSink for delete (Memory Governance MVP, Section 10.2)", async () => {
     const client = mockClient();
     const audit = mockAuditSink();
     const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
     await service.delete("owned");
-    expect(audit.record).not.toHaveBeenCalled();
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    expect(audit.events[0]).toMatchObject({ operation: "DELETE", decision: "ALLOW", memoryId: "owned" });
   });
 
   it("loses no audit events across parallel safe writes", async () => {
@@ -548,5 +566,292 @@ describe("MemoryService classification / provenance governance (Phase 4)", () =>
     expect(client.update).toHaveBeenCalledWith("owned", {
       metadata: { note: "x", classification: "PROJECT_FACT", authority: "supplemental" },
     });
+  });
+});
+
+describe("MemoryService infer=true governance (Memory Governance MVP, Section 8)", () => {
+  it("blocks add when infer=true and never calls upstream add", async () => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await expect(
+      service.add({ messages: [{ role: "user", content: "safe content" }], infer: true }),
+    ).rejects.toMatchObject({ code: "opaque_upstream_mutation_not_allowed" } satisfies Partial<GatewayError>);
+
+    expect(client.add).not.toHaveBeenCalled();
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    expect(audit.events[0]).toMatchObject({
+      operation: "ADD",
+      decision: "BLOCK",
+      reasonCodes: ["opaque_upstream_mutation_not_allowed"],
+    });
+    expect(audit.events[0]).not.toHaveProperty("contentHash");
+  });
+
+  it("preserves existing behavior when infer is false", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.add({ messages: [{ role: "user", content: "safe content" }], infer: false });
+    expect(client.add).toHaveBeenCalledWith(expect.objectContaining({ infer: false }));
+  });
+
+  it("preserves existing behavior when infer is omitted", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.add({ messages: [{ role: "user", content: "safe content" }] });
+    expect(client.add).toHaveBeenCalledTimes(1);
+    const [call] = vi.mocked(client.add).mock.calls[0]!;
+    expect(call).not.toHaveProperty("infer");
+  });
+
+  it("fails closed on AuditSink failure for an infer=true block: upstream add is never called", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), failingAuditSink());
+    await expect(
+      service.add({ messages: [{ role: "user", content: "safe content" }], infer: true }),
+    ).rejects.toMatchObject({ code: "governance_audit_unavailable" } satisfies Partial<GatewayError>);
+    expect(client.add).not.toHaveBeenCalled();
+  });
+
+  it("blocks infer=true even when combined with an otherwise-privileged EXPLICIT_REPORTED write", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await expect(
+      service.add({
+        messages: [{ role: "user", content: "safe content" }],
+        infer: true,
+        classification: "USER_DECISION",
+        explicit_user_request: true,
+      }),
+    ).rejects.toMatchObject({ code: "opaque_upstream_mutation_not_allowed" } satisfies Partial<GatewayError>);
+    expect(client.add).not.toHaveBeenCalled();
+  });
+});
+
+describe("MemoryService Automation Policy integration on add (Memory Governance MVP, Section 5-6)", () => {
+  it.each(["USER_DECISION", "ORGANIZATION_POLICY", "PROJECT_DECISION"] as const)(
+    "%s: ALLOW with explicit_user_request=true, BLOCK automation_policy_restricted without it",
+    async (classification) => {
+      const client = mockClient();
+      const audit = mockAuditSink();
+      const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+
+      await service.add({ messages: [{ role: "user", content: "note" }], classification, explicit_user_request: true });
+      expect(client.add).toHaveBeenCalledTimes(1);
+      expect(audit.events[0]).toMatchObject({ decision: "ALLOW" });
+
+      await expect(
+        service.add({ messages: [{ role: "user", content: "note 2" }], classification }),
+      ).rejects.toMatchObject({ code: "automation_policy_restricted" } satisfies Partial<GatewayError>);
+      expect(client.add).toHaveBeenCalledTimes(1);
+      expect(audit.events[1]).toMatchObject({ decision: "BLOCK", reasonCodes: ["automation_policy_restricted"] });
+
+      await expect(
+        service.add({ messages: [{ role: "user", content: "note 3" }], classification, explicit_user_request: false }),
+      ).rejects.toMatchObject({ code: "automation_policy_restricted" } satisfies Partial<GatewayError>);
+      expect(client.add).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("EXTERNAL_UNTRUSTED: BLOCK with untrusted_source reason when not explicit_user_request", async () => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await expect(
+      service.add({ messages: [{ role: "user", content: "note" }], classification: "EXTERNAL_UNTRUSTED" }),
+    ).rejects.toMatchObject({ code: "automation_policy_restricted" } satisfies Partial<GatewayError>);
+    expect(audit.events[0]).toMatchObject({ decision: "BLOCK", reasonCodes: ["untrusted_source"] });
+    expect(client.add).not.toHaveBeenCalled();
+  });
+
+  it("EXTERNAL_UNTRUSTED: ALLOW with explicit_user_request=true", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.add({
+      messages: [{ role: "user", content: "note" }],
+      classification: "EXTERNAL_UNTRUSTED",
+      explicit_user_request: true,
+    });
+    expect(client.add).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["USER_PREFERENCE", "PROJECT_FACT", "WORKFLOW_STATE", "LONG_TERM_KNOWLEDGE", "TEMPORARY_CONTEXT"] as const)(
+    "%s: stays ALLOW regardless of writeIntent (legacy compatibility)",
+    async (classification) => {
+      const client = mockClient();
+      const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+      await service.add({ messages: [{ role: "user", content: "note" }], classification });
+      await service.add({ messages: [{ role: "user", content: "note 2" }], classification, explicit_user_request: false });
+      await service.add({ messages: [{ role: "user", content: "note 3" }], classification, explicit_user_request: true });
+      expect(client.add).toHaveBeenCalledTimes(3);
+    },
+  );
+
+  it("UNCLASSIFIED (omitted classification) stays ALLOW with no explicit_user_request — full legacy calling style", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.add({ messages: [{ role: "user", content: "plain legacy note" }] });
+    expect(client.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("HIGH_CONFIDENCE secret detection overrides Automation Policy ALLOW (an always-ALLOW classification with explicit_user_request=true)", async () => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await expect(
+      service.add({
+        messages: [{ role: "user", content: "ghp_1234567890abcdefghijklmnopqrstuvwxyz" }],
+        classification: "USER_PREFERENCE",
+        explicit_user_request: true,
+      }),
+    ).rejects.toMatchObject({ code: "secret_detected_high_confidence" } satisfies Partial<GatewayError>);
+    expect(client.add).not.toHaveBeenCalled();
+    expect(audit.events[0]).toMatchObject({ decision: "BLOCK", reasonCodes: ["secret_detected_high_confidence"] });
+  });
+
+  it("fails closed on AuditSink failure for an automation-policy BLOCK", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), failingAuditSink());
+    await expect(
+      service.add({ messages: [{ role: "user", content: "note" }], classification: "USER_DECISION" }),
+    ).rejects.toMatchObject({ code: "governance_audit_unavailable" } satisfies Partial<GatewayError>);
+    expect(client.add).not.toHaveBeenCalled();
+  });
+});
+
+describe("MemoryService UPDATE Automation Policy + existing-classification protection (Memory Governance MVP, Section 9)", () => {
+  it("blocks an implicit update declaring USER_DECISION and never calls upstream update", async () => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await expect(
+      service.update("owned", { text: "revised decision", classification: "USER_DECISION" }),
+    ).rejects.toMatchObject({ code: "automation_policy_restricted" } satisfies Partial<GatewayError>);
+    expect(client.update).not.toHaveBeenCalled();
+    expect(audit.events[0]).toMatchObject({ operation: "UPDATE", decision: "BLOCK", reasonCodes: ["automation_policy_restricted"] });
+  });
+
+  it("allows an explicit-reported update declaring USER_DECISION", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.update("owned", { text: "revised decision", classification: "USER_DECISION", explicit_user_request: true });
+    expect(client.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("a caller cannot bypass an existing PROJECT_DECISION record's protection by declaring a weaker classification (downgrade-bypass)", async () => {
+    const client = mockClient();
+    vi.mocked(client.get).mockResolvedValue({
+      id: "owned",
+      user_id: userId,
+      metadata: { classification: "PROJECT_DECISION" },
+    });
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+
+    // Caller declares no classification at all (defaults to UNCLASSIFIED,
+    // an always-ALLOW class) and does not report explicit_user_request —
+    // the existing PROJECT_DECISION classification must still govern.
+    await expect(
+      service.update("owned", { text: "quietly rewritten" }),
+    ).rejects.toMatchObject({ code: "automation_policy_restricted" } satisfies Partial<GatewayError>);
+    expect(client.update).not.toHaveBeenCalled();
+    expect(audit.events[0]).toMatchObject({ decision: "BLOCK", reasonCodes: ["automation_policy_restricted"] });
+  });
+
+  it("the downgrade-bypass protection is lifted by explicit_user_request=true", async () => {
+    const client = mockClient();
+    vi.mocked(client.get).mockResolvedValue({
+      id: "owned",
+      user_id: userId,
+      metadata: { classification: "PROJECT_DECISION" },
+    });
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.update("owned", { text: "deliberately rewritten", explicit_user_request: true });
+    expect(client.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("an existing record with no recoverable classification (legacy/pre-Governance record) is not falsely protected", async () => {
+    const client = mockClient();
+    vi.mocked(client.get).mockResolvedValue({ id: "owned", user_id: userId, memory: "legacy content" });
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.update("owned", { text: "ordinary update" });
+    expect(client.update).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("MemoryService DELETE governance (Memory Governance MVP, Section 10)", () => {
+  it("allows deleting a memory with no recoverable classification, unaffected (legacy compatibility)", async () => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await service.delete("owned");
+    expect(client.delete).toHaveBeenCalledTimes(1);
+    expect(audit.events[0]).toMatchObject({ operation: "DELETE", decision: "ALLOW" });
+  });
+
+  it.each(["USER_DECISION", "ORGANIZATION_POLICY", "PROJECT_DECISION"] as const)(
+    "blocks deleting a %s memory without explicit_user_request and never calls upstream delete",
+    async (classification) => {
+      const client = mockClient();
+      vi.mocked(client.get).mockResolvedValue({ id: "owned", user_id: userId, metadata: { classification } });
+      const audit = mockAuditSink();
+      const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+      await expect(service.delete("owned")).rejects.toMatchObject({
+        code: "automation_policy_restricted",
+      } satisfies Partial<GatewayError>);
+      expect(client.delete).not.toHaveBeenCalled();
+      expect(audit.events[0]).toMatchObject({ operation: "DELETE", decision: "BLOCK", reasonCodes: ["automation_policy_restricted"] });
+    },
+  );
+
+  it.each(["USER_DECISION", "ORGANIZATION_POLICY", "PROJECT_DECISION"] as const)(
+    "allows deleting a %s memory when explicit_user_request=true",
+    async (classification) => {
+      const client = mockClient();
+      vi.mocked(client.get).mockResolvedValue({ id: "owned", user_id: userId, metadata: { classification } });
+      const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+      await service.delete("owned", { explicitUserRequest: true });
+      expect(client.delete).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["SECRET", "CUSTOMER_CONFIDENTIAL"] as const)(
+    "does NOT block deleting a legacy %s-classified memory (Section 10.1: deletion of restricted-classification legacy data must stay possible)",
+    async (classification) => {
+      const client = mockClient();
+      vi.mocked(client.get).mockResolvedValue({ id: "owned", user_id: userId, metadata: { classification } });
+      const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+      await service.delete("owned");
+      expect(client.delete).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("fails closed on AuditSink failure for delete: upstream delete is never called", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), failingAuditSink());
+    await expect(service.delete("owned")).rejects.toMatchObject({
+      code: "governance_audit_unavailable",
+    } satisfies Partial<GatewayError>);
+    expect(client.delete).not.toHaveBeenCalled();
+  });
+
+  it("never places Memory content in the DELETE audit event", async () => {
+    const client = mockClient();
+    vi.mocked(client.get).mockResolvedValue({ id: "owned", user_id: userId, memory: "sensitive private content" });
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await service.delete("owned");
+    const serialized = JSON.stringify(audit.events[0]);
+    expect(serialized).not.toContain("sensitive private content");
+  });
+
+  it("still verifies scope ownership before evaluating delete governance", async () => {
+    const client = mockClient();
+    vi.mocked(client.get).mockResolvedValue({ id: "foreign", user_id: "another-scope", metadata: { classification: "USER_DECISION" } });
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    await expect(service.delete("foreign")).rejects.toMatchObject({ code: "not_found" } satisfies Partial<GatewayError>);
+    expect(client.delete).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
   });
 });

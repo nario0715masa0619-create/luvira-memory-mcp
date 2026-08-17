@@ -19,7 +19,13 @@ export type GatewayErrorCode =
   // Memory Write Governance (Phase 4): the caller declared classification
   // SECRET or CUSTOMER_CONFIDENTIAL. Minimal safety exception, not
   // risk-tiered Automation Policy — see memory-service.ts.
-  | "classification_restricted";
+  | "classification_restricted"
+  // Memory Governance MVP: Automation Policy required an explicit-reported
+  // write for this classification and did not get one.
+  | "automation_policy_restricted"
+  // Memory Governance MVP: `infer=true` was rejected because Mem0's
+  // resulting opaque mutation cannot be audited before it happens.
+  | "opaque_upstream_mutation_not_allowed";
 
 export class GatewayError extends Error {
   constructor(
