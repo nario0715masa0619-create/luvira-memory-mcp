@@ -1,8 +1,10 @@
 import { GatewayError } from "./errors.js";
+import { detectHighConfidenceSecret, type SecretDetectionInput } from "./governance/secret-detection.js";
 import type { AddMemoryRequest, Mem0Client, SearchMemoryRequest, UpdateMemoryRequest } from "./mem0-client.js";
 import { scopeToMem0UserId, type ScopeResolver } from "./scope.js";
 
 const RESERVED_METADATA_KEYS = new Set(["user_id", "agent_id", "run_id"]);
+const SECRET_BLOCKED_MESSAGE = "Memory write blocked by governance policy.";
 
 export class MemoryService {
   constructor(
@@ -13,6 +15,7 @@ export class MemoryService {
   async add(input: Omit<AddMemoryRequest, "user_id">): Promise<unknown> {
     const userId = await this.currentUserId();
     validateMetadata(input.metadata);
+    assertNoHighConfidenceSecret({ texts: input.messages.map((message) => message.content), metadata: input.metadata });
     return this.client.add({ ...input, user_id: userId });
   }
 
@@ -29,6 +32,13 @@ export class MemoryService {
   async update(memoryId: string, input: UpdateMemoryRequest): Promise<unknown> {
     const userId = await this.currentUserId();
     validateMetadata(input.metadata);
+    // Secret check runs before the ownership preflight (getOwned), which is
+    // itself a Mem0 call: a payload that will be blocked regardless should
+    // not spend an extra upstream round trip first. This ordering does not
+    // create a new ownership side channel — the block decision depends only
+    // on the submitted payload, never on whether memoryId exists or is
+    // owned by the caller, so the response is identical either way.
+    assertNoHighConfidenceSecret({ texts: [input.text], metadata: input.metadata });
     await this.getOwned(memoryId, userId);
     return this.client.update(memoryId, input);
   }
@@ -68,5 +78,17 @@ function validateMetadata(metadata: Record<string, unknown> | null | undefined):
     if (RESERVED_METADATA_KEYS.has(key)) {
       throw new GatewayError("validation_error", `Metadata key '${key}' is reserved`);
     }
+  }
+}
+
+/**
+ * Memory Write Governance (Phase 3, AR-4): blocks ADD/UPDATE payloads that
+ * match a high-confidence secret pattern before any Mem0 call is made. The
+ * thrown error never includes the matched value or which pattern matched.
+ */
+function assertNoHighConfidenceSecret(input: SecretDetectionInput): void {
+  const result = detectHighConfidenceSecret(input);
+  if (result.riskTier === "HIGH_CONFIDENCE") {
+    throw new GatewayError("secret_detected_high_confidence", SECRET_BLOCKED_MESSAGE, false);
   }
 }

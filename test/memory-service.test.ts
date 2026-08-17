@@ -56,3 +56,96 @@ describe("MemoryService scope boundary", () => {
     ).rejects.toMatchObject({ code: "validation_error" } satisfies Partial<GatewayError>);
   });
 });
+
+describe("MemoryService high-confidence secret governance (Phase 3, AR-4)", () => {
+  const FAKE_GITHUB_TOKEN = "ghp_1234567890abcdefghijklmnopqrstuvwxyz";
+
+  it("adds an ordinary memory unchanged", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope));
+    await service.add({ messages: [{ role: "user", content: "remember the deploy window is Friday" }] });
+    expect(client.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks add when message content matches a high-confidence secret and never calls upstream", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope));
+    await expect(
+      service.add({ messages: [{ role: "user", content: FAKE_GITHUB_TOKEN }] }),
+    ).rejects.toMatchObject({ code: "secret_detected_high_confidence" } satisfies Partial<GatewayError>);
+    expect(client.add).not.toHaveBeenCalled();
+  });
+
+  it("blocks add when metadata contains a high-confidence secret and never calls upstream", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope));
+    await expect(
+      service.add({
+        messages: [{ role: "user", content: "safe text" }],
+        metadata: { nested: { token: FAKE_GITHUB_TOKEN } },
+      }),
+    ).rejects.toMatchObject({ code: "secret_detected_high_confidence" } satisfies Partial<GatewayError>);
+    expect(client.add).not.toHaveBeenCalled();
+  });
+
+  it("updates an ordinary memory unchanged", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope));
+    await service.update("owned", { text: "deploy window moved to Monday" });
+    expect(client.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks update when the new text matches a high-confidence secret and never calls upstream get or update", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope));
+    await expect(
+      service.update("owned", { text: FAKE_GITHUB_TOKEN }),
+    ).rejects.toMatchObject({ code: "secret_detected_high_confidence" } satisfies Partial<GatewayError>);
+    expect(client.get).not.toHaveBeenCalled();
+    expect(client.update).not.toHaveBeenCalled();
+  });
+
+  it("blocks update when metadata matches a high-confidence secret and never calls upstream get or update", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope));
+    await expect(
+      service.update("owned", { metadata: { key: FAKE_GITHUB_TOKEN } }),
+    ).rejects.toMatchObject({ code: "secret_detected_high_confidence" } satisfies Partial<GatewayError>);
+    expect(client.get).not.toHaveBeenCalled();
+    expect(client.update).not.toHaveBeenCalled();
+  });
+
+  it("leaves search unaffected by secret governance", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope));
+    await service.search({ query: FAKE_GITHUB_TOKEN });
+    expect(client.search).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves get unaffected by secret governance", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope));
+    await service.get("owned");
+    expect(client.get).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves delete unaffected by secret governance", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope));
+    await service.delete("owned");
+    expect(client.delete).toHaveBeenCalledTimes(1);
+  });
+
+  it("never includes the matched secret value in the thrown error", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope));
+    try {
+      await service.add({ messages: [{ role: "user", content: FAKE_GITHUB_TOKEN }] });
+      throw new Error("expected service.add to reject");
+    } catch (error) {
+      const serialized = JSON.stringify({ message: (error as GatewayError).message, name: (error as GatewayError).name });
+      expect(serialized).not.toContain(FAKE_GITHUB_TOKEN);
+      expect(serialized).not.toContain("ghp_");
+    }
+  });
+});
