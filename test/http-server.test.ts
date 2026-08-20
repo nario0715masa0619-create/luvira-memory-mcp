@@ -3,11 +3,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TokenAuthRegistry } from "../src/auth-registry.js";
+import { loadAuthRegistry, TokenAuthRegistry } from "../src/auth-registry.js";
 import type { AppConfig } from "../src/config.js";
+import type { AuditSink } from "../src/governance/audit-sink.js";
 import { createGatewayHttpServer } from "../src/http-server.js";
 import type { Logger } from "../src/logger.js";
-import type { MemoryService } from "../src/memory-service.js";
+import { Mem0Client } from "../src/mem0-client.js";
+import { scopeToMem0UserId } from "../src/scope.js";
 
 const servers: ReturnType<typeof createGatewayHttpServer>[] = [];
 afterEach(async () => {
@@ -32,18 +34,51 @@ const authRegistry = new TokenAuthRegistry([
   { token: "gateway-secret", tenant: "test", project: "test", subject: "test", role: "read_write" },
 ]);
 
-function serviceMock(): MemoryService {
+function mem0Mock(): Mem0Client {
   return {
-    add: vi.fn(), search: vi.fn(), get: vi.fn(), update: vi.fn(), delete: vi.fn(),
-  } as unknown as MemoryService;
+    add: vi.fn(), search: vi.fn(), get: vi.fn(), update: vi.fn(), delete: vi.fn(), ready: vi.fn(),
+  } as unknown as Mem0Client;
 }
 
-async function start(readinessCheck: () => Promise<void> = async () => {}): Promise<URL> {
-  const server = createGatewayHttpServer(serviceMock(), config, silentLogger, authRegistry, readinessCheck);
+function auditSinkMock(): AuditSink {
+  return { record: vi.fn().mockResolvedValue(undefined) };
+}
+
+function mem0ClientWithFetch(fetchMock: typeof fetch): Mem0Client {
+  return new Mem0Client({ baseUrl: new URL("http://localhost:8888"), apiKey: "mem0-secret", timeoutMs: 1000, fetch: fetchMock });
+}
+
+async function startServer(
+  mem0: Mem0Client,
+  registry: TokenAuthRegistry,
+  auditSink: AuditSink = auditSinkMock(),
+  readinessCheck: () => Promise<void> = async () => {},
+): Promise<URL> {
+  const server = createGatewayHttpServer(mem0, auditSink, config, silentLogger, registry, readinessCheck);
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;
   return new URL(`http://127.0.0.1:${address.port}/mcp`);
+}
+
+async function start(readinessCheck: () => Promise<void> = async () => {}): Promise<URL> {
+  return startServer(mem0Mock(), authRegistry, auditSinkMock(), readinessCheck);
+}
+
+async function callToolAt(
+  url: URL,
+  bearerToken: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<Awaited<ReturnType<Client["callTool"]>>> {
+  const transport = new StreamableHTTPClientTransport(url, {
+    requestInit: { headers: { Authorization: `Bearer ${bearerToken}` } },
+  });
+  const client = new Client({ name: "phase2-test-client", version: "1.0.0" });
+  await client.connect(transport as Transport);
+  const result = await client.callTool({ name, arguments: args });
+  await client.close();
+  return result;
 }
 
 describe("health endpoints", () => {
@@ -126,20 +161,13 @@ describe("Streamable HTTP security boundary", () => {
 
 describe("multi-token auth registry", () => {
   it("accepts any token present in the registry, not only the first", async () => {
-    const service = serviceMock();
-    const server = createGatewayHttpServer(
-      service,
-      config,
-      silentLogger,
+    const url = await startServer(
+      mem0Mock(),
       new TokenAuthRegistry([
         { token: "token-a", tenant: "test", project: "test", subject: "test", role: "read_write" },
         { token: "token-b", tenant: "test", project: "kimi-project", subject: "test", role: "read_only" },
       ]),
     );
-    servers.push(server);
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address() as AddressInfo;
-    const url = new URL(`http://127.0.0.1:${address.port}/mcp`);
 
     const response = await fetch(url, {
       method: "POST",
@@ -147,5 +175,125 @@ describe("multi-token auth registry", () => {
       body: "{}",
     });
     expect(response.status).not.toBe(401);
+  });
+});
+
+describe("Project-Aware Scope (Phase 2): per-request scope isolation", () => {
+  const scopeA = { tenant: "test", project: "project-a", subject: "user-1" };
+  const scopeB = { tenant: "test", project: "project-b", subject: "user-1" };
+  const twoProjectRegistry = new TokenAuthRegistry([
+    { token: "token-a", ...scopeA, role: "read_write" },
+    { token: "token-b", ...scopeB, role: "read_write" },
+  ]);
+
+  function okAddResponse(): Response {
+    return new Response(JSON.stringify({ results: [] }), { status: 200 });
+  }
+
+  it("resolves token A's memory_add to project-a's Mem0 user_id", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(okAddResponse());
+    const url = await startServer(mem0ClientWithFetch(fetchMock), twoProjectRegistry);
+    await callToolAt(url, "token-a", "memory_add", { messages: [{ role: "user", content: "hi" }] });
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(String(init?.body)).user_id).toBe(scopeToMem0UserId(scopeA));
+  });
+
+  it("resolves token B's memory_add to project-b's Mem0 user_id, on the same running Gateway process", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(okAddResponse());
+    const url = await startServer(mem0ClientWithFetch(fetchMock), twoProjectRegistry);
+    await callToolAt(url, "token-a", "memory_add", { messages: [{ role: "user", content: "from a" }] });
+    await callToolAt(url, "token-b", "memory_add", { messages: [{ role: "user", content: "from b" }] });
+
+    const userIds = fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).user_id as string);
+    expect(userIds).toEqual([scopeToMem0UserId(scopeA), scopeToMem0UserId(scopeB)]);
+  });
+
+  it("resolves the same token to the same user_id across separate requests (deterministic)", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(okAddResponse());
+    const url = await startServer(mem0ClientWithFetch(fetchMock), twoProjectRegistry);
+    await callToolAt(url, "token-a", "memory_add", { messages: [{ role: "user", content: "one" }] });
+    await callToolAt(url, "token-a", "memory_add", { messages: [{ role: "user", content: "two" }] });
+
+    const userIds = fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).user_id as string);
+    expect(userIds).toEqual([scopeToMem0UserId(scopeA), scopeToMem0UserId(scopeA)]);
+  });
+
+  it("injects the resolved project's user_id into memory_search filters, not the other project's", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    const url = await startServer(mem0ClientWithFetch(fetchMock), twoProjectRegistry);
+    await callToolAt(url, "token-b", "memory_search", { query: "q" });
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(String(init?.body)).filters).toEqual({ user_id: scopeToMem0UserId(scopeB) });
+  });
+
+  it("rejects memory_get for a memory owned by a different project's scope as not_found", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ id: "mem-1", user_id: scopeToMem0UserId(scopeB), memory: "project-b content" }), { status: 200 }),
+    );
+    const url = await startServer(mem0ClientWithFetch(fetchMock), twoProjectRegistry);
+    const result = await callToolAt(url, "token-a", "memory_get", { memory_id: "mem-1" });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ ok: false, error: { code: "not_found" } });
+  });
+
+  it("rejects memory_update for a memory owned by a different project's scope without mutating it", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: "mem-1", user_id: scopeToMem0UserId(scopeB) }), { status: 200 }),
+    );
+    const url = await startServer(mem0ClientWithFetch(fetchMock), twoProjectRegistry);
+    const result = await callToolAt(url, "token-a", "memory_update", { memory_id: "mem-1", text: "changed" });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ ok: false, error: { code: "not_found" } });
+    expect(fetchMock).toHaveBeenCalledTimes(1); // only the ownership GET — no PUT reached Mem0
+  });
+
+  it("rejects memory_delete for a memory owned by a different project's scope without deleting it", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: "mem-1", user_id: scopeToMem0UserId(scopeB) }), { status: 200 }),
+    );
+    const url = await startServer(mem0ClientWithFetch(fetchMock), twoProjectRegistry);
+    const result = await callToolAt(url, "token-a", "memory_delete", { memory_id: "mem-1" });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ ok: false, error: { code: "not_found" } });
+    expect(fetchMock).toHaveBeenCalledTimes(1); // only the ownership GET — no DELETE reached Mem0
+  });
+
+  it("does not let a spoofed source_project field change the resolved Mem0 user_id", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(okAddResponse());
+    const url = await startServer(mem0ClientWithFetch(fetchMock), twoProjectRegistry);
+    await callToolAt(url, "token-a", "memory_add", {
+      messages: [{ role: "user", content: "hi" }],
+      source_project: "project-b",
+    });
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(String(init?.body)).user_id).toBe(scopeToMem0UserId(scopeA));
+  });
+
+  it("does not let a spoofed source_client field change the resolved Mem0 user_id", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(okAddResponse());
+    const url = await startServer(mem0ClientWithFetch(fetchMock), twoProjectRegistry);
+    await callToolAt(url, "token-a", "memory_add", {
+      messages: [{ role: "user", content: "hi" }],
+      source_client: "kimi",
+    });
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(String(init?.body)).user_id).toBe(scopeToMem0UserId(scopeA));
+  });
+
+  it("falls back to the legacy single-token scope when no registry file exists", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(okAddResponse());
+    const fallbackRegistry = new TokenAuthRegistry(loadAuthRegistry(config, () => { throw new Error("ENOENT"); }));
+    const url = await startServer(mem0ClientWithFetch(fetchMock), fallbackRegistry);
+    await callToolAt(url, "gateway-secret", "memory_add", { messages: [{ role: "user", content: "hi" }] });
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(String(init?.body)).user_id).toBe(scopeToMem0UserId(config.scope));
   });
 });

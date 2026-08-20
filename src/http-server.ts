@@ -1,10 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { TokenAuthRegistry } from "./auth-registry.js";
+import { toRequestContext, type TokenAuthRegistry } from "./auth-registry.js";
 import type { AppConfig } from "./config.js";
+import type { AuditSink } from "./governance/audit-sink.js";
 import type { Logger } from "./logger.js";
-import type { MemoryService } from "./memory-service.js";
+import type { Mem0Client } from "./mem0-client.js";
+import { MemoryService } from "./memory-service.js";
+import { StaticScopeResolver } from "./scope.js";
 import { createMcpServer } from "./tools.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -12,7 +15,8 @@ const MAX_REQUEST_BYTES = 1024 * 1024;
 export type ReadinessCheck = () => Promise<void>;
 
 export function createGatewayHttpServer(
-  service: MemoryService,
+  mem0: Mem0Client,
+  auditSink: AuditSink,
   config: AppConfig,
   logger: Logger,
   authRegistry: TokenAuthRegistry,
@@ -44,16 +48,18 @@ export function createGatewayHttpServer(
         sendJson(response, 403, { error: "forbidden" });
         return;
       }
-      // Phase 1 of Project-Aware Scope: the matched entry's tenant/project/
-      // subject/role are validated but not yet consulted here — scope
-      // resolution stays on the process-wide ScopeResolver (Phase 2) and no
-      // tool checks role yet (Phase 3). Today this call only answers
-      // "is the presented token in the registry at all".
-      if (resolveAuthEntry(request, authRegistry) === undefined) {
+      const authEntry = resolveAuthEntry(request, authRegistry);
+      if (authEntry === undefined) {
         response.setHeader("WWW-Authenticate", "Bearer");
         sendJson(response, 401, { error: "unauthorized" });
         return;
       }
+      // Project-Aware Scope (Phase 2): the resolved entry's scope becomes
+      // this request's — and only this request's — MemoryScope. `token`
+      // never leaves resolveAuthEntry/authEntry; toRequestContext strips it
+      // before anything else touches the result. `role` is carried but
+      // unused — no tool checks it yet (Phase 3).
+      const requestContext = toRequestContext(authEntry);
       if (!new Set(["GET", "POST", "DELETE"]).has(request.method ?? "")) {
         response.setHeader("Allow", "GET, POST, DELETE");
         sendJson(response, 405, { error: "method_not_allowed" });
@@ -61,7 +67,13 @@ export function createGatewayHttpServer(
       }
 
       const parsedBody = request.method === "POST" ? await readJsonBody(request) : undefined;
-      const mcpServer = createMcpServer(service);
+      // A fresh StaticScopeResolver + MemoryService per request — not a
+      // process-global resolver reused across requests — is what makes two
+      // concurrent requests presenting different tokens resolve to
+      // different Mem0 user_ids. No mutable shared state is written here.
+      const requestScopeResolver = new StaticScopeResolver(requestContext.scope);
+      const requestService = new MemoryService(mem0, requestScopeResolver, auditSink);
+      const mcpServer = createMcpServer(requestService);
       const transport = new StreamableHTTPServerTransport({
         enableJsonResponse: true,
       });

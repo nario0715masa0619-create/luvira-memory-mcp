@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
+import type { MemoryScope } from "./scope.js";
 import { scopePart } from "./scope.js";
 
 /**
@@ -100,4 +101,24 @@ export class TokenAuthRegistry {
     }
     return undefined;
   }
+}
+
+/**
+ * Project-Aware Scope (Phase 2): what a resolved `AuthRegistryEntry`
+ * contributes to request handling once authentication has already
+ * succeeded. Deliberately narrower than `AuthRegistryEntry` — `token` never
+ * appears here, so nothing downstream of `toRequestContext` can log,
+ * serialize, or otherwise leak the raw credential. `role` is carried
+ * unchanged for Phase 3; no Phase 2 code path reads it.
+ */
+export interface AuthenticatedRequestContext {
+  readonly scope: MemoryScope;
+  readonly role: ClientRole;
+}
+
+export function toRequestContext(entry: AuthRegistryEntry): AuthenticatedRequestContext {
+  return {
+    scope: { tenant: entry.tenant, project: entry.project, subject: entry.subject },
+    role: entry.role,
+  };
 }
