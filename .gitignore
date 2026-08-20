@@ -5,6 +5,7 @@ logs/
 .env
 .env.*
 !.env.example
+config/auth-registry.json
 *.log
 *.tsbuildinfo
 .DS_Store

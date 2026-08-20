@@ -1,0 +1,88 @@
+import { describe, expect, it } from "vitest";
+import { loadAuthRegistry, TokenAuthRegistry } from "../src/auth-registry.js";
+import type { AppConfig } from "../src/config.js";
+
+const config: AppConfig = {
+  mem0: { baseUrl: new URL("http://localhost:8888"), apiKey: "mem0-secret", timeoutMs: 1000 },
+  scope: { tenant: "personal", project: "shared", subject: "owner" },
+  server: {
+    host: "127.0.0.1",
+    port: 8765,
+    apiKey: "gateway-secret",
+    allowedOrigins: new Set(),
+  },
+  governance: { auditPath: "unused-in-this-test.jsonl" },
+  authRegistry: { path: "config/auth-registry.json" },
+};
+
+function fileNotFound(): never {
+  throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+}
+
+describe("loadAuthRegistry", () => {
+  it("falls back to one implicit read_write entry from the single-token config when no file exists", () => {
+    const entries = loadAuthRegistry(config, fileNotFound);
+    expect(entries).toEqual([
+      { token: "gateway-secret", tenant: "personal", project: "shared", subject: "owner", role: "read_write" },
+    ]);
+  });
+
+  it("loads multiple entries from a valid registry file", () => {
+    const fileContents = JSON.stringify([
+      { token: "token-a", tenant: "personal", project: "shared", subject: "owner", role: "read_write" },
+      { token: "token-b", tenant: "personal", project: "shared", subject: "owner", role: "read_only" },
+    ]);
+    const entries = loadAuthRegistry(config, () => fileContents);
+    expect(entries).toHaveLength(2);
+    expect(entries[1]).toMatchObject({ token: "token-b", role: "read_only" });
+  });
+
+  it("rejects a registry file with an invalid role", () => {
+    const fileContents = JSON.stringify([
+      { token: "token-a", tenant: "personal", project: "shared", subject: "owner", role: "admin" },
+    ]);
+    expect(() => loadAuthRegistry(config, () => fileContents)).toThrow();
+  });
+
+  it("rejects a registry file with an empty entry list", () => {
+    expect(() => loadAuthRegistry(config, () => "[]")).toThrow();
+  });
+
+  it("rejects a registry file with a duplicate token across entries", () => {
+    const fileContents = JSON.stringify([
+      { token: "same-token", tenant: "personal", project: "shared", subject: "owner", role: "read_write" },
+      { token: "same-token", tenant: "personal", project: "kimi-project", subject: "owner", role: "read_only" },
+    ]);
+    expect(() => loadAuthRegistry(config, () => fileContents)).toThrow();
+  });
+
+  it("rejects a registry file with an invalid tenant/project/subject character", () => {
+    const fileContents = JSON.stringify([
+      { token: "token-a", tenant: "personal/../etc", project: "shared", subject: "owner", role: "read_write" },
+    ]);
+    expect(() => loadAuthRegistry(config, () => fileContents)).toThrow();
+  });
+});
+
+describe("TokenAuthRegistry", () => {
+  const entryA = { token: "token-a", tenant: "personal", project: "shared", subject: "owner", role: "read_write" as const };
+  const entryB = { token: "token-b", tenant: "personal", project: "kimi-project", subject: "owner", role: "read_only" as const };
+  const registry = new TokenAuthRegistry([entryA, entryB]);
+
+  it("resolves the matching entry for a known token", () => {
+    expect(registry.resolve("token-a")).toEqual(entryA);
+    expect(registry.resolve("token-b")).toEqual(entryB);
+  });
+
+  it("returns undefined for an unknown token", () => {
+    expect(registry.resolve("token-c")).toBeUndefined();
+  });
+
+  it("returns undefined for a token of a different length than any entry", () => {
+    expect(registry.resolve("short")).toBeUndefined();
+  });
+
+  it("returns undefined for the empty string", () => {
+    expect(registry.resolve("")).toBeUndefined();
+  });
+});

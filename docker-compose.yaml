@@ -23,6 +23,11 @@ services:
       # host-side, git-ignored `logs/` directory already used by the
       # Windows bootstrap task.
       - ./logs:/app/logs
+      # Multi-token auth registry (Phase 1 of project-aware scope). Read-only:
+      # the Gateway only ever reads this file. config/auth-registry.json is
+      # git-ignored and optional — when absent, loadAuthRegistry() falls back
+      # to the existing single-token behavior (see src/auth-registry.ts).
+      - ./config:/app/config:ro
     healthcheck:
       test:
         - CMD

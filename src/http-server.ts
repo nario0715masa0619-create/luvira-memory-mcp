@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { timingSafeEqual } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { TokenAuthRegistry } from "./auth-registry.js";
 import type { AppConfig } from "./config.js";
 import type { Logger } from "./logger.js";
 import type { MemoryService } from "./memory-service.js";
@@ -15,6 +15,7 @@ export function createGatewayHttpServer(
   service: MemoryService,
   config: AppConfig,
   logger: Logger,
+  authRegistry: TokenAuthRegistry,
   readinessCheck: ReadinessCheck = async () => {},
 ): Server {
   return createServer(async (request, response) => {
@@ -43,7 +44,12 @@ export function createGatewayHttpServer(
         sendJson(response, 403, { error: "forbidden" });
         return;
       }
-      if (!isAuthorized(request, config.server.apiKey)) {
+      // Phase 1 of Project-Aware Scope: the matched entry's tenant/project/
+      // subject/role are validated but not yet consulted here — scope
+      // resolution stays on the process-wide ScopeResolver (Phase 2) and no
+      // tool checks role yet (Phase 3). Today this call only answers
+      // "is the presented token in the registry at all".
+      if (resolveAuthEntry(request, authRegistry) === undefined) {
         response.setHeader("WWW-Authenticate", "Bearer");
         sendJson(response, 401, { error: "unauthorized" });
         return;
@@ -101,12 +107,10 @@ function isAllowedOrigin(request: IncomingMessage, allowed: ReadonlySet<string>)
   return origin === undefined || allowed.has(origin);
 }
 
-function isAuthorized(request: IncomingMessage, expected: string): boolean {
+function resolveAuthEntry(request: IncomingMessage, authRegistry: TokenAuthRegistry) {
   const header = request.headers.authorization;
-  if (header === undefined || !header.startsWith("Bearer ")) return false;
-  const actual = Buffer.from(header.slice("Bearer ".length));
-  const wanted = Buffer.from(expected);
-  return actual.length === wanted.length && timingSafeEqual(actual, wanted);
+  if (header === undefined || !header.startsWith("Bearer ")) return undefined;
+  return authRegistry.resolve(header.slice("Bearer ".length));
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {

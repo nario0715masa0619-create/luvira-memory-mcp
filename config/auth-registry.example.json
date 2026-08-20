@@ -1,0 +1,16 @@
+[
+  {
+    "token": "<issue a separate long random value per row — never reuse across rows>",
+    "tenant": "personal",
+    "project": "shared",
+    "subject": "owner",
+    "role": "read_write"
+  },
+  {
+    "token": "<a different long random value for this row>",
+    "tenant": "personal",
+    "project": "shared",
+    "subject": "owner",
+    "role": "read_only"
+  }
+]

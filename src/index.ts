@@ -1,3 +1,4 @@
+import { loadAuthRegistry, TokenAuthRegistry } from "./auth-registry.js";
 import { loadConfig } from "./config.js";
 import { JsonlAuditSink } from "./governance/audit-sink.js";
 import { createGatewayHttpServer, listen } from "./http-server.js";
@@ -8,11 +9,12 @@ import { StaticScopeResolver, scopeFingerprint, scopeToMem0UserId } from "./scop
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  const authRegistry = new TokenAuthRegistry(loadAuthRegistry(config));
   const scopeResolver = new StaticScopeResolver(config.scope);
   const mem0 = new Mem0Client(config.mem0);
   const auditSink = new JsonlAuditSink(config.governance.auditPath);
   const service = new MemoryService(mem0, scopeResolver, auditSink);
-  const server = createGatewayHttpServer(service, config, logger, () => mem0.ready());
+  const server = createGatewayHttpServer(service, config, logger, authRegistry, () => mem0.ready());
 
   await listen(server, config);
   logger.info("gateway_started", {

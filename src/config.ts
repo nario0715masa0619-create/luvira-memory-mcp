@@ -18,6 +18,12 @@ const environmentSchema = z.object({
   // for Docker, landing in the same host-persistent `logs/` directory in
   // both cases without hardcoding an absolute path here.
   GOVERNANCE_AUDIT_PATH: nonEmpty.default("logs/governance-audit.jsonl"),
+  // Multi-token auth registry (Phase 1 of project-aware scope). Relative to
+  // process.cwd() for the same bare-metal/Docker reason as GOVERNANCE_AUDIT_PATH.
+  // When no file exists at this path, loadAuthRegistry() falls back to a
+  // single implicit entry built from LUVIRA_MCP_API_KEY / LUVIRA_SCOPE_* below —
+  // existing single-token deployments keep their current behavior unchanged.
+  LUVIRA_AUTH_REGISTRY_PATH: nonEmpty.default("config/auth-registry.json"),
 });
 
 export interface AppConfig {
@@ -39,6 +45,9 @@ export interface AppConfig {
   };
   governance: {
     auditPath: string;
+  };
+  authRegistry: {
+    path: string;
   };
 }
 
@@ -65,6 +74,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     },
     governance: {
       auditPath: parsed.GOVERNANCE_AUDIT_PATH,
+    },
+    authRegistry: {
+      path: parsed.LUVIRA_AUTH_REGISTRY_PATH,
     },
   };
 }

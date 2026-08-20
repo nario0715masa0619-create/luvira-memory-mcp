@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-const scopePart = z.string().trim().min(1).max(128).regex(/^[\p{L}\p{N}._-]+$/u);
+// Exported so other modules validating a tenant/project/subject component
+// (e.g. auth-registry.ts) share exactly this rule rather than a parallel copy.
+export const scopePart = z.string().trim().min(1).max(128).regex(/^[\p{L}\p{N}._-]+$/u);
 
 export interface MemoryScope {
   tenant: string;

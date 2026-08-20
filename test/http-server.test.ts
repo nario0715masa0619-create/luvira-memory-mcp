@@ -3,6 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { TokenAuthRegistry } from "../src/auth-registry.js";
 import type { AppConfig } from "../src/config.js";
 import { createGatewayHttpServer } from "../src/http-server.js";
 import type { Logger } from "../src/logger.js";
@@ -24,7 +25,12 @@ const config: AppConfig = {
     allowedOrigins: new Set(["http://localhost:3080"]),
   },
   governance: { auditPath: "unused-in-this-test.jsonl" },
+  authRegistry: { path: "unused-in-this-test.json" },
 };
+
+const authRegistry = new TokenAuthRegistry([
+  { token: "gateway-secret", tenant: "test", project: "test", subject: "test", role: "read_write" },
+]);
 
 function serviceMock(): MemoryService {
   return {
@@ -33,7 +39,7 @@ function serviceMock(): MemoryService {
 }
 
 async function start(readinessCheck: () => Promise<void> = async () => {}): Promise<URL> {
-  const server = createGatewayHttpServer(serviceMock(), config, silentLogger, readinessCheck);
+  const server = createGatewayHttpServer(serviceMock(), config, silentLogger, authRegistry, readinessCheck);
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;
@@ -106,5 +112,40 @@ describe("Streamable HTTP security boundary", () => {
       body: "{}",
     });
     expect(response.status).not.toBe(403);
+  });
+
+  it("rejects a Bearer token that is not in the auth registry", async () => {
+    const response = await fetch(await start(), {
+      method: "POST",
+      headers: { Authorization: "Bearer not-a-registered-token" },
+      body: "{}",
+    });
+    expect(response.status).toBe(401);
+  });
+});
+
+describe("multi-token auth registry", () => {
+  it("accepts any token present in the registry, not only the first", async () => {
+    const service = serviceMock();
+    const server = createGatewayHttpServer(
+      service,
+      config,
+      silentLogger,
+      new TokenAuthRegistry([
+        { token: "token-a", tenant: "test", project: "test", subject: "test", role: "read_write" },
+        { token: "token-b", tenant: "test", project: "kimi-project", subject: "test", role: "read_only" },
+      ]),
+    );
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address() as AddressInfo;
+    const url = new URL(`http://127.0.0.1:${address.port}/mcp`);
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: "Bearer token-b" },
+      body: "{}",
+    });
+    expect(response.status).not.toBe(401);
   });
 });
