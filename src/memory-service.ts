@@ -245,6 +245,15 @@ export class MemoryService {
 
   private async getOwned(memoryId: string, expectedUserId: string): Promise<unknown> {
     const memory = await this.client.get(memoryId);
+    // Mem0's GET returns HTTP 200 with a `null` body for a nonexistent or
+    // already-deleted memory (it only maps to HTTP 404 on DELETE/PUT, not
+    // GET) — this is Mem0's well-defined not-found shape, not a broken
+    // response, so it belongs with the other not_found cases below rather
+    // than upstream_contract_error. A non-null response missing `user_id`
+    // is a separate, genuine contract violation and must stay distinct.
+    if (memory === null) {
+      throw new GatewayError("not_found", "Memory not found");
+    }
     const actualUserId = extractUserId(memory);
     if (actualUserId === undefined) {
       throw new GatewayError("upstream_contract_error", "Mem0 memory response lacks user_id");

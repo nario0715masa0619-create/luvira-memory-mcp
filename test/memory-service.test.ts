@@ -66,6 +66,29 @@ describe("MemoryService scope boundary", () => {
     expect(client.delete).not.toHaveBeenCalled();
   });
 
+  it.each(["get", "update", "delete"])("treats a null Mem0 response (nonexistent/deleted memory) as not_found during %s", async (operation) => {
+    const client = mockClient();
+    vi.mocked(client.get).mockResolvedValue(null);
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    const call = operation === "get"
+      ? service.get("gone")
+      : operation === "update"
+        ? service.update("gone", { text: "x" })
+        : service.delete("gone");
+    await expect(call).rejects.toMatchObject({ code: "not_found", message: "Memory not found" } satisfies Partial<GatewayError>);
+    expect(client.update).not.toHaveBeenCalled();
+    expect(client.delete).not.toHaveBeenCalled();
+  });
+
+  it("treats a non-null Mem0 response missing user_id as upstream_contract_error, not not_found", async () => {
+    const client = mockClient();
+    vi.mocked(client.get).mockResolvedValue({ id: "malformed", memory: "no user_id field here" });
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await expect(service.get("malformed")).rejects.toMatchObject(
+      { code: "upstream_contract_error", message: "Mem0 memory response lacks user_id" } satisfies Partial<GatewayError>,
+    );
+  });
+
   it("rejects reserved metadata keys", async () => {
     const service = new MemoryService(mockClient(), new StaticScopeResolver(scope), mockAuditSink());
     await expect(
