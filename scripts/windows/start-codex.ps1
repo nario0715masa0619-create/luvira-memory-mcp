@@ -13,8 +13,11 @@ $ErrorActionPreference = 'Stop'
 
 $CredentialName = 'LUVIRA_MCP_API_KEY'
 $RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+# Client Credential Rollout finalization: defaults to a Codex-only credential
+# file, not the multi-client shared .env, so a plain `start-codex.ps1` (no
+# -EnvFile) never resolves to a credential another client also holds.
 $CredentialFile = if ([string]::IsNullOrWhiteSpace($EnvFile)) {
-    Join-Path $RepositoryRoot '.env'
+    Join-Path $RepositoryRoot '.env.codex'
 }
 else {
     [IO.Path]::GetFullPath($EnvFile)

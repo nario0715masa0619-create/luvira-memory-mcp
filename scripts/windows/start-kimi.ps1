@@ -19,8 +19,13 @@ $LuviraCredentialName = 'LUVIRA_MCP_API_KEY'
 $OpenRouterCredentialName = 'OPENROUTER_KEY'
 $RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 
+# Client Credential Rollout finalization: defaults to a Kimi-only credential
+# file, not the multi-client shared .env. Security-critical for Kimi
+# specifically — its dedicated credential is registered read_only, while the
+# shared/Claude Code credential is read_write; a plain `start-kimi.ps1` (no
+# -EnvFile) must never silently pick up write access.
 $LuviraCredentialFile = if ([string]::IsNullOrWhiteSpace($EnvFile)) {
-    Join-Path $RepositoryRoot '.env'
+    Join-Path $RepositoryRoot '.env.kimi'
 }
 else {
     [IO.Path]::GetFullPath($EnvFile)

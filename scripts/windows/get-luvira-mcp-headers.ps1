@@ -1,5 +1,7 @@
 [CmdletBinding(PositionalBinding = $false)]
-param()
+param(
+    [string]$EnvFile = ''
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -8,7 +10,19 @@ $ExpectedServerName = 'luvira-memory'
 $ExpectedServerUrl = 'http://127.0.0.1:8765/mcp'
 $CredentialName = 'LUVIRA_MCP_API_KEY'
 $RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-$CredentialFile = Join-Path $RepositoryRoot '.env'
+# Client Credential Rollout finalization: defaults to a Claude-Code-only
+# credential file, not the multi-client shared .env, so a normal
+# ~/.claude.json headersHelper invocation (no -EnvFile) never resolves to a
+# credential any other client also holds. No silent fallback to .env if
+# .env.claude is missing — Read-DotEnvValue's FileNotFoundException already
+# propagates to the catch block below and fails closed (exit 1), same as
+# every other failure mode here.
+$CredentialFile = if ([string]::IsNullOrWhiteSpace($EnvFile)) {
+    Join-Path $RepositoryRoot '.env.claude'
+}
+else {
+    [IO.Path]::GetFullPath($EnvFile)
+}
 
 function Read-DotEnvValue {
     param(
