@@ -25,7 +25,7 @@ The Gateway persists nothing. A process restart loses no memory state because Me
 
 ## ScopeResolver
 
-`ScopeResolver` is the trust boundary between connection/authentication policy and memory operations. The initial `StaticScopeResolver` reads validated environment configuration. It produces:
+`ScopeResolver` is the trust boundary between connection/authentication policy and memory operations. `StaticScopeResolver` produces:
 
 ```text
 luvira:v1:<tenant>:<project>:<subject>
@@ -33,7 +33,7 @@ luvira:v1:<tenant>:<project>:<subject>
 
 Each component is validated and URI encoded. This value becomes the Mem0 `user_id`; it is never accepted from tool arguments.
 
-Future resolvers may use authenticated claims or centrally managed policy without changing tools or `MemoryService`. Untrusted model arguments and arbitrary client headers must not directly become a scope.
+`StaticScopeResolver` is constructed fresh per HTTP request (see `http-server.ts`), seeded from the `tenant`/`project`/`subject` of the Auth Registry entry the presented Bearer token resolved to — not from a single process-wide value. Two requests presenting different tokens resolve to different Mem0 `user_id`s on the same running Gateway process; a request with no matching registry entry never reaches `MemoryService` at all (401 first). The single-token fallback (`LUVIRA_MCP_API_KEY` / `LUVIRA_SCOPE_*`) is what the Gateway uses when no registry file is present — see `docs/security.md`. Untrusted model arguments and arbitrary client headers must not directly become a scope.
 
 ## Ownership enforcement
 

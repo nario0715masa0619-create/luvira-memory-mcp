@@ -2,6 +2,8 @@
 
 Luvira Memory MCP is a thin, client-agnostic MCP Gateway for a self-hosted Mem0 server. It exposes five memory tools over stateless Streamable HTTP while keeping Mem0 as the only canonical memory store.
 
+**Status: Memory Multi-Client / Multi-Project Governance MVP — COMPLETE.** Dedicated per-client credentials, per-request project isolation, and Gateway-side read/write role enforcement are implemented and verified. See [MVP completion record](docs/MVP_COMPLETION.md) for the full baseline.
+
 ```text
 MCP clients ── Streamable HTTP ── Luvira Memory MCP ── REST ── Self-hosted Mem0
                                                                   │
@@ -101,5 +103,6 @@ npm test -- test/integration/mem0.integration.test.ts
 For a complete three-repository Windows rebuild, follow the
 [Windows deployment and recovery guide](docs/windows-setup.md). See also
 [architecture](docs/architecture.md), [security](docs/security.md),
-[client configuration](docs/client-configuration.md), and
-[automatic startup](docs/windows-autostart.md).
+[client configuration](docs/client-configuration.md),
+[automatic startup](docs/windows-autostart.md), and the
+[MVP completion record](docs/MVP_COMPLETION.md).

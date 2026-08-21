@@ -262,9 +262,13 @@ Code Desktop からの利用でも次を原則とする:
 - 信頼していない外部コンテンツ(Web ページ、第三者から受け取ったファイルなど)を
   自動的に Memory へ保存しない。
 
-これらは現時点ではクライアント側の運用ルールであり、Gateway 側での
-permission enforcement(書き込み種別ごとの強制的なアクセス制御)としては
-実装されていない。
+上記のうち、高確信度のsecret様パターンの検出はGateway側のwrite governance
+(secret detection)が既に強制する。また、認証済みcredentialの`role`
+(Auth Registry entry由来、`read_only`/`read_write`)がGateway側で
+`memory_add`/`memory_update`/`memory_delete`を強制的に許可/拒否する
+(詳細は`docs/security.md`)。ただしClaude Code Desktop用のcredentialは
+通常`read_write`で登録されるため、この節の残りの箇条書き(何を・いつ書くか
+の判断)は引き続きクライアント側の運用ルールであり、Gateway側では強制されない。
 
 ### セットアップ / 検証
 

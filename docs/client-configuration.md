@@ -1,6 +1,6 @@
 # Client configuration
 
-All clients must point to the same Streamable HTTP endpoint and use the same Gateway credential to share the configured scope. The Gateway core does not receive or use client product names.
+All clients point to the same Streamable HTTP endpoint. Each client should use its own dedicated Bearer credential, registered in the Auth Registry (`config/auth-registry.json`) with its own `role` (`read_write` or `read_only`) — see `docs/security.md`. The Gateway core does not receive or use client product names; a client's scope and role come solely from which registered token it presents, never from anything the client identifies itself as. A single shared `LUVIRA_MCP_API_KEY` remains supported as the fallback when no registry file exists, but is not the production-recommended setup once more than one client is in use.
 
 ## LibreChat
 
