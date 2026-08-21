@@ -159,7 +159,15 @@ export type GovernanceReasonCode =
   | "project_scope_unresolved"
   // Project-Aware Scope (Phase 3): the authenticated credential's role
   // (from the auth registry, never a client self-assertion) is read_only.
-  | "role_forbidden_write";
+  | "role_forbidden_write"
+  // Handoff Identity Safety (ADR-003, MVP duplicate prevention): ADD
+  // blocked because a non-expired handoff already exists for this scope +
+  // handoff_project_id. Best-effort, not atomic — see memory-service.ts.
+  | "handoff_already_active"
+  // Handoff Identity Safety (ADR-003, MVP duplicate prevention): UPDATE
+  // blocked because it tried to move an existing Handoff-shaped record to a
+  // different handoff_project_id. Identity is immutable after creation.
+  | "handoff_identity_immutable";
 
 /**
  * Confidence tier for pattern-based secret detection (AR-4). Not a claim of

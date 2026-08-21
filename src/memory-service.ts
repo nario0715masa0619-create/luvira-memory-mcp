@@ -23,6 +23,15 @@ const INFER_NOT_ALLOWED_MESSAGE = "Memory write with infer=true is not allowed b
 // Deliberately generic — no project name, client name, or role detail, so
 // this is safe to return verbatim to any caller regardless of scope.
 const ROLE_FORBIDDEN_MESSAGE = "Memory write is not permitted for this credential.";
+// Deliberately generic — no project id, memory id, or scope detail (Handoff
+// Identity Safety / MVP Duplicate Prevention, ADR-003 Section 19).
+const HANDOFF_ALREADY_ACTIVE_MESSAGE = "An active handoff already exists for this project.";
+const HANDOFF_IDENTITY_IMMUTABLE_MESSAGE = "This memory's handoff project identity cannot be changed after creation.";
+// Required by the Mem0 search contract but never used for candidate
+// selection in hasActiveHandoff() below — only the exact-match filters
+// (user_id + handoff_project_id + classification) narrow the candidate set;
+// this constant's text is irrelevant to correctness.
+const HANDOFF_DUPLICATE_CHECK_QUERY = "handoff";
 const DEFAULT_CLASSIFICATION: MemoryClassification = "UNCLASSIFIED";
 
 /** Classifications a caller may never persist, regardless of explicit-request or content. */
@@ -98,16 +107,67 @@ export class MemoryService {
       texts: mem0Input.messages.map((message) => message.content),
       metadata: mem0Input.metadata,
     });
-    const verdict = this.evaluateWriteGovernance(resolvedClassification, writeIntent, secretResult);
+
+    // Handoff Identity Safety (ADR-003 Section 19 / MVP Duplicate
+    // Prevention): early gates (classification restriction, secret
+    // detection) get their own audit-and-throw first, exactly like UPDATE's
+    // evaluateEarlyGates step below — so the state-dependent duplicate
+    // lookup that follows never runs for a write that was always going to
+    // be blocked for a content-only reason.
+    const earlyVerdict = this.evaluateEarlyGates(resolvedClassification, secretResult);
+    if (earlyVerdict.decision === "BLOCK") {
+      await this.auditAndMaybeThrow({
+        operation: "ADD",
+        userId,
+        classification: resolvedClassification,
+        decision: earlyVerdict.decision,
+        reasonCodes: earlyVerdict.reasonCodes,
+        errorCode: earlyVerdict.errorCode,
+        errorMessage: earlyVerdict.errorMessage,
+        sourceType: source_type,
+        writeIntent,
+        sourceProject: source_project,
+        sourceClient: source_client,
+      });
+    }
+
+    // MVP Duplicate Prevention (ADR-003 "1 project = 1 active handoff"):
+    // only writes that are actually Handoff-shaped — TEMPORARY_CONTEXT with
+    // a caller-supplied metadata.handoff_project_id — are subject to this
+    // check. Ordinary TEMPORARY_CONTEXT writes and any other classification
+    // (including one that happens to carry a handoff_project_id-looking
+    // metadata key without TEMPORARY_CONTEXT) are unaffected.
+    const handoffProjectId = extractHandoffProjectId(mem0Input.metadata);
+    if (resolvedClassification === "TEMPORARY_CONTEXT" && handoffProjectId !== undefined) {
+      const alreadyActive = await this.hasActiveHandoff(handoffProjectId);
+      if (alreadyActive) {
+        await this.auditAndMaybeThrow({
+          operation: "ADD",
+          userId,
+          classification: resolvedClassification,
+          decision: "BLOCK",
+          reasonCodes: ["handoff_already_active"],
+          errorCode: "handoff_already_active",
+          errorMessage: HANDOFF_ALREADY_ACTIVE_MESSAGE,
+          sourceType: source_type,
+          writeIntent,
+          sourceProject: source_project,
+          sourceClient: source_client,
+        });
+      }
+    }
+
+    const policy = evaluateAutomationPolicy(resolvedClassification, writeIntent);
+    const decision: GovernanceDecision = policy.allowed ? "ALLOW" : "BLOCK";
     await this.auditAndMaybeThrow({
       operation: "ADD",
       userId,
       classification: resolvedClassification,
-      decision: verdict.decision,
-      reasonCodes: verdict.reasonCodes,
-      errorCode: verdict.errorCode,
-      errorMessage: verdict.errorMessage,
-      contentHashInput: verdict.decision === "ALLOW" ? { messages: mem0Input.messages, metadata: mem0Input.metadata } : undefined,
+      decision,
+      reasonCodes: policy.reasonCodes,
+      errorCode: policy.allowed ? null : "automation_policy_restricted",
+      errorMessage: GOVERNANCE_BLOCKED_MESSAGE,
+      contentHashInput: decision === "ALLOW" ? { messages: mem0Input.messages, metadata: mem0Input.metadata } : undefined,
       sourceType: source_type,
       writeIntent,
       sourceProject: source_project,
@@ -205,16 +265,38 @@ export class MemoryService {
 
     const existing = await this.getOwned(memoryId, userId);
     const effectiveClassification = effectiveClassificationFor(declaredClassification, extractClassification(existing));
+
+    // Handoff Identity Safety (ADR-003 Section 19 / MVP Duplicate
+    // Prevention): handoff_project_id is immutable after creation. An
+    // UPDATE that omits it entirely is unaffected — Mem0's update merges
+    // the supplied metadata into the existing record rather than replacing
+    // it, so the stored handoff_project_id survives untouched. Only an
+    // UPDATE that explicitly supplies a *different* value is blocked; the
+    // same value is a harmless no-op ALLOW.
+    const existingHandoffProjectId = extractHandoffProjectId(extractMetadata(existing));
+    const requestedHandoffProjectId = extractHandoffProjectId(mem0Input.metadata);
+    const identityChangeAttempted = extractClassification(existing) === "TEMPORARY_CONTEXT"
+      && existingHandoffProjectId !== undefined
+      && requestedHandoffProjectId !== undefined
+      && requestedHandoffProjectId !== existingHandoffProjectId;
+
     const policy = evaluateAutomationPolicy(effectiveClassification, writeIntent);
-    const decision: GovernanceDecision = policy.allowed ? "ALLOW" : "BLOCK";
+    const decision: GovernanceDecision = !identityChangeAttempted && policy.allowed ? "ALLOW" : "BLOCK";
+    const reasonCodes: readonly GovernanceReasonCode[] = identityChangeAttempted
+      ? ["handoff_identity_immutable"]
+      : policy.reasonCodes;
+    const errorCode: GatewayErrorCode | null = identityChangeAttempted
+      ? "handoff_identity_immutable"
+      : (policy.allowed ? null : "automation_policy_restricted");
+    const errorMessage = identityChangeAttempted ? HANDOFF_IDENTITY_IMMUTABLE_MESSAGE : GOVERNANCE_BLOCKED_MESSAGE;
     await this.auditAndMaybeThrow({
       operation: "UPDATE",
       userId,
       classification: declaredClassification,
       decision,
-      reasonCodes: policy.reasonCodes,
-      errorCode: policy.allowed ? null : "automation_policy_restricted",
-      errorMessage: GOVERNANCE_BLOCKED_MESSAGE,
+      reasonCodes,
+      errorCode,
+      errorMessage,
       contentHashInput: decision === "ALLOW" ? { text: mem0Input.text, metadata: mem0Input.metadata } : undefined,
       memoryId: decision === "ALLOW" ? memoryId : undefined,
       sourceType: source_type,
@@ -284,8 +366,9 @@ export class MemoryService {
    * (including the ownership GET that update/delete would otherwise issue
    * next) — a read_only credential never reaches Mem0 at all. Independent
    * of and never a substitute for the write-governance checks that follow
-   * it for a role that does pass: see evaluateEarlyGates /
-   * evaluateWriteGovernance / the DELETE protection below.
+   * it for a role that does pass: see evaluateEarlyGates, the handoff
+   * duplicate/identity checks in add()/update(), and the DELETE protection
+   * below.
    */
   private async enforceWriteRole(
     operation: GovernanceWriteOperation,
@@ -349,25 +432,31 @@ export class MemoryService {
     return { decision: "ALLOW", reasonCodes: [], errorCode: null, errorMessage: "" };
   }
 
-  /** Full ADD governance: early gates, then Automation Policy. */
-  private evaluateWriteGovernance(
-    classification: MemoryClassification,
-    writeIntent: WriteIntent | undefined,
-    secretResult: SecretDetectionResult,
-  ): WriteGovernanceVerdict {
-    const early = this.evaluateEarlyGates(classification, secretResult);
-    if (early.decision === "BLOCK") return early;
-
-    const policy = evaluateAutomationPolicy(classification, writeIntent);
-    if (!policy.allowed) {
-      return {
-        decision: "BLOCK",
-        reasonCodes: policy.reasonCodes,
-        errorCode: "automation_policy_restricted",
-        errorMessage: GOVERNANCE_BLOCKED_MESSAGE,
-      };
-    }
-    return { decision: "ALLOW", reasonCodes: [], errorCode: null, errorMessage: "" };
+  /**
+   * MVP Duplicate Prevention (ADR-003 "1 project = 1 active handoff"):
+   * best-effort existence check reusing the same exact-match composition
+   * search() already applies for handoff_project_id (user_id +
+   * handoff_project_id + classification TEMPORARY_CONTEXT, expired records
+   * excluded via show_expired: false). `query` is required by the Mem0
+   * contract but plays no role in selection here — only the exact-match
+   * filters narrow the candidate set, and this method only asks whether
+   * that narrowed set is non-empty.
+   *
+   * Not atomic: this is a read followed, on the caller's side, by a
+   * separate write — two concurrent ADD calls for the same scope and
+   * handoff_project_id can still race past both checks and both succeed.
+   * The MVP concurrency model (single active execution thread per project)
+   * accepts this as a known limitation rather than introducing a
+   * distributed lock, a transaction, or a new store.
+   */
+  private async hasActiveHandoff(handoffProjectId: string): Promise<boolean> {
+    const response = await this.search({
+      query: HANDOFF_DUPLICATE_CHECK_QUERY,
+      handoff_project_id: handoffProjectId,
+      top_k: 1,
+      show_expired: false,
+    });
+    return extractResultCount(response) > 0;
   }
 
   /**
@@ -454,6 +543,16 @@ function effectiveClassificationFor(
 }
 
 /**
+ * Reads a Memory's `metadata` object back from Mem0's response. Returns
+ * `undefined` — never a guess — when absent, null, or not an object.
+ */
+function extractMetadata(memory: unknown): Record<string, unknown> | undefined {
+  if (memory === null || typeof memory !== "object") return undefined;
+  const metadata = (memory as Record<string, unknown>).metadata;
+  return metadata !== null && typeof metadata === "object" ? (metadata as Record<string, unknown>) : undefined;
+}
+
+/**
  * Reads a Memory's previously-stored classification back from Mem0's
  * response (`metadata.classification`, the same key `buildMem0Metadata`
  * writes). Returns `undefined` — never a guess — when absent or not a
@@ -461,11 +560,36 @@ function effectiveClassificationFor(
  * Gateway's Phase 4+ code, will not have this field.
  */
 function extractClassification(memory: unknown): string | undefined {
-  if (memory === null || typeof memory !== "object") return undefined;
-  const metadata = (memory as Record<string, unknown>).metadata;
-  if (metadata === null || typeof metadata !== "object") return undefined;
-  const classification = (metadata as Record<string, unknown>).classification;
+  const classification = extractMetadata(memory)?.classification;
   return typeof classification === "string" ? classification : undefined;
+}
+
+/**
+ * Handoff Identity Safety (ADR-003 Section 19 / MVP Duplicate Prevention):
+ * reads `handoff_project_id` from a metadata object (either caller-supplied
+ * write input, or an existing Memory's stored metadata). Returns `undefined`
+ * for anything that is not a non-empty string — this is a locator value, not
+ * free-form content, and an absent/malformed value must never be treated as
+ * "no restriction applies" by accident.
+ */
+function extractHandoffProjectId(metadata: Record<string, unknown> | null | undefined): string | undefined {
+  if (metadata === null || metadata === undefined) return undefined;
+  const value = metadata.handoff_project_id;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * MVP Duplicate Prevention: reads only the result array's length from
+ * Mem0's search response. If the response is not the well-defined
+ * `{ results: [...] }` shape, this treats the count as 0 rather than
+ * blocking an ADD on an unrelated upstream contract surprise — this check
+ * is explicitly best-effort (see hasActiveHandoff), so failing open here
+ * does not weaken a guarantee that does not otherwise exist.
+ */
+function extractResultCount(response: unknown): number {
+  if (response === null || typeof response !== "object") return 0;
+  const results = (response as Record<string, unknown>).results;
+  return Array.isArray(results) ? results.length : 0;
 }
 
 /**

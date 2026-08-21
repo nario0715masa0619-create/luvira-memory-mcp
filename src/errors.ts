@@ -30,7 +30,19 @@ export type GatewayErrorCode =
   // read_only. Independent of every other write-governance check above —
   // reachable even for a caller whose content and classification would
   // otherwise be ALLOWed.
-  | "role_forbidden_write";
+  | "role_forbidden_write"
+  // Handoff Identity Safety (ADR-003, MVP duplicate prevention): an ADD for
+  // classification TEMPORARY_CONTEXT with metadata.handoff_project_id was
+  // blocked because a non-expired record already exists for the same
+  // resolved scope and handoff_project_id. Best-effort, not atomic — see
+  // memory-service.ts hasActiveHandoff().
+  | "handoff_already_active"
+  // Handoff Identity Safety (ADR-003, MVP duplicate prevention): an UPDATE
+  // tried to change an existing Handoff-shaped record's
+  // metadata.handoff_project_id to a different value. handoff_project_id is
+  // immutable after creation — a metadata update that omits it entirely is
+  // unaffected (Mem0 merges update metadata into the existing record).
+  | "handoff_identity_immutable";
 
 export class GatewayError extends Error {
   constructor(

@@ -901,6 +901,201 @@ describe("MemoryService DELETE governance (Memory Governance MVP, Section 10)", 
   });
 });
 
+describe("Handoff duplicate prevention (ADR-003 MVP invariant: 1 project = 1 active handoff)", () => {
+  function handoffAdd(overrides: Record<string, unknown> = {}) {
+    return {
+      messages: [{ role: "user" as const, content: "handoff state" }],
+      classification: "TEMPORARY_CONTEXT" as const,
+      metadata: { handoff_project_id: "project-x" },
+      ...overrides,
+    };
+  }
+
+  it("A: allows ADD when no active handoff exists for the scope/handoff_project_id", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await expect(service.add(handoffAdd())).resolves.toBeDefined();
+    expect(client.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("B+C: blocks a second ADD when a non-expired active handoff already exists, with zero Mem0 add calls", async () => {
+    const client = mockClient();
+    vi.mocked(client.search).mockResolvedValue({ results: [{ id: "existing-handoff" }] });
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await expect(service.add(handoffAdd())).rejects.toMatchObject({ code: "handoff_already_active" } satisfies Partial<GatewayError>);
+    expect(client.add).not.toHaveBeenCalled();
+  });
+
+  it("D: does not block ADD for a different handoff_project_id in the same scope", async () => {
+    const client = mockClient();
+    vi.mocked(client.search).mockImplementation(async (request) => {
+      const filters = (request as { filters?: Record<string, unknown> }).filters ?? {};
+      return filters.handoff_project_id === "project-x" ? { results: [{ id: "existing" }] } : { results: [] };
+    });
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await expect(service.add(handoffAdd({ metadata: { handoff_project_id: "project-y" } }))).resolves.toBeDefined();
+    expect(client.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("E: does not block ADD when the existing active handoff belongs to a different authenticated scope", async () => {
+    const otherUserId = scopeToMem0UserId({ tenant: "personal", project: "shared", subject: "someone-else" });
+    const client = mockClient();
+    vi.mocked(client.search).mockImplementation(async (request) => {
+      const filters = (request as { filters?: Record<string, unknown> }).filters ?? {};
+      return filters.user_id === otherUserId ? { results: [{ id: "existing" }] } : { results: [] };
+    });
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await expect(service.add(handoffAdd())).resolves.toBeDefined();
+  });
+
+  it("F: composes show_expired=false into the duplicate-check search request (reuses Mem0's own expiration exclusion)", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.add(handoffAdd());
+    expect(client.search).toHaveBeenCalledWith(expect.objectContaining({
+      filters: { user_id: userId, handoff_project_id: "project-x", classification: "TEMPORARY_CONTEXT" },
+      show_expired: false,
+      top_k: 1,
+    }));
+  });
+
+  it("G: does not perform a duplicate check for TEMPORARY_CONTEXT without handoff_project_id (existing behavior unchanged)", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.add({ messages: [{ role: "user", content: "just context" }], classification: "TEMPORARY_CONTEXT" });
+    expect(client.search).not.toHaveBeenCalled();
+    expect(client.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("H: does not perform a duplicate check for LONG_TERM_KNOWLEDGE even with handoff_project_id metadata (out of enforcement scope)", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.add(handoffAdd({ classification: "LONG_TERM_KNOWLEDGE" }));
+    expect(client.search).not.toHaveBeenCalled();
+    expect(client.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("I: allows a new ADD after the existing active handoff has been deleted", async () => {
+    const client = mockClient();
+    let activeExists = true;
+    vi.mocked(client.search).mockImplementation(async () => (activeExists ? { results: [{ id: "existing" }] } : { results: [] }));
+    vi.mocked(client.get).mockResolvedValue({
+      id: "existing", user_id: userId,
+      metadata: { classification: "TEMPORARY_CONTEXT", handoff_project_id: "project-x" },
+    });
+    vi.mocked(client.delete).mockImplementation(async () => {
+      activeExists = false;
+      return { message: "Memory deleted successfully" };
+    });
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+
+    await expect(service.add(handoffAdd())).rejects.toMatchObject({ code: "handoff_already_active" } satisfies Partial<GatewayError>);
+    await service.delete("existing", { explicitUserRequest: true });
+    await expect(service.add(handoffAdd())).resolves.toBeDefined();
+  });
+
+  it("J: allows UPDATE that resupplies the same handoff_project_id", async () => {
+    const client = mockClient();
+    vi.mocked(client.get).mockResolvedValue({
+      id: "owned", user_id: userId,
+      metadata: { classification: "TEMPORARY_CONTEXT", handoff_project_id: "project-x" },
+    });
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await expect(service.update("owned", {
+      text: "updated action",
+      metadata: { handoff_project_id: "project-x", current_action: "still working" },
+    })).resolves.toBeDefined();
+    expect(client.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("K: blocks UPDATE that tries to change handoff_project_id to a different value (identity is immutable)", async () => {
+    const client = mockClient();
+    vi.mocked(client.get).mockResolvedValue({
+      id: "owned", user_id: userId,
+      metadata: { classification: "TEMPORARY_CONTEXT", handoff_project_id: "project-x" },
+    });
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await expect(service.update("owned", { metadata: { handoff_project_id: "project-y" } }))
+      .rejects.toMatchObject({ code: "handoff_identity_immutable" } satisfies Partial<GatewayError>);
+    expect(client.update).not.toHaveBeenCalled();
+  });
+
+  it("update omitting handoff_project_id entirely is not treated as an identity change (Mem0 merges, does not replace, metadata)", async () => {
+    const client = mockClient();
+    vi.mocked(client.get).mockResolvedValue({
+      id: "owned", user_id: userId,
+      metadata: { classification: "TEMPORARY_CONTEXT", handoff_project_id: "project-x" },
+    });
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await expect(service.update("owned", { metadata: { current_action: "still working" } })).resolves.toBeDefined();
+    expect(client.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("L: source_project has no effect on duplicate detection or the composed search filters", async () => {
+    const client = mockClient();
+    vi.mocked(client.search).mockResolvedValue({ results: [{ id: "existing" }] });
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await expect(service.add(handoffAdd({ source_project: "spoofed-project" })))
+      .rejects.toMatchObject({ code: "handoff_already_active" } satisfies Partial<GatewayError>);
+    const [searchRequest] = vi.mocked(client.search).mock.calls[0]!;
+    expect((searchRequest as { filters: unknown }).filters).toEqual({
+      user_id: userId, handoff_project_id: "project-x", classification: "TEMPORARY_CONTEXT",
+    });
+  });
+
+  it("N: a read_only credential is blocked before the duplicate-handoff lookup ever runs (zero Mem0 calls)", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink(), "read_only", "cred-fp");
+    await expect(service.add(handoffAdd())).rejects.toMatchObject({ code: "role_forbidden_write" } satisfies Partial<GatewayError>);
+    expect(client.search).not.toHaveBeenCalled();
+    expect(client.add).not.toHaveBeenCalled();
+  });
+
+  it("records a handoff_already_active BLOCK without leaking handoff_project_id, the existing memory id, or content", async () => {
+    const client = mockClient();
+    vi.mocked(client.search).mockResolvedValue({ results: [{ id: "existing-handoff-id-should-not-leak" }] });
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    const error = (await service.add(handoffAdd()).catch((e: unknown) => e)) as GatewayError;
+
+    expect(error).toMatchObject({ code: "handoff_already_active" } satisfies Partial<GatewayError>);
+    expect(String(error.message)).not.toContain("project-x");
+    expect(String(error.message)).not.toContain("existing-handoff-id-should-not-leak");
+
+    expect(audit.events).toHaveLength(1);
+    expect(audit.events[0]).toMatchObject({ decision: "BLOCK", reasonCodes: ["handoff_already_active"], classification: "TEMPORARY_CONTEXT" });
+    expect(audit.events[0]!.contentHash).toBeUndefined();
+    expect(audit.events[0]!.memoryId).toBeUndefined();
+    const serializedEvent = JSON.stringify(audit.events[0]);
+    expect(serializedEvent).not.toContain("project-x");
+    expect(serializedEvent).not.toContain("existing-handoff-id-should-not-leak");
+  });
+
+  it("records a handoff_identity_immutable BLOCK without leaking either handoff_project_id value or the memory id", async () => {
+    const client = mockClient();
+    vi.mocked(client.get).mockResolvedValue({
+      id: "owned-memory-id-should-not-leak", user_id: userId,
+      metadata: { classification: "TEMPORARY_CONTEXT", handoff_project_id: "project-x" },
+    });
+    const audit = mockAuditSink();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), audit);
+    const error = (await service.update("owned-memory-id-should-not-leak", { metadata: { handoff_project_id: "project-y" } })
+      .catch((e: unknown) => e)) as GatewayError;
+
+    expect(error).toMatchObject({ code: "handoff_identity_immutable" } satisfies Partial<GatewayError>);
+    expect(String(error.message)).not.toContain("project-x");
+    expect(String(error.message)).not.toContain("project-y");
+
+    expect(audit.events).toHaveLength(1);
+    expect(audit.events[0]).toMatchObject({ decision: "BLOCK", reasonCodes: ["handoff_identity_immutable"] });
+    expect(audit.events[0]!.memoryId).toBeUndefined();
+    const serializedEvent = JSON.stringify(audit.events[0]);
+    expect(serializedEvent).not.toContain("project-x");
+    expect(serializedEvent).not.toContain("project-y");
+    expect(serializedEvent).not.toContain("owned-memory-id-should-not-leak");
+  });
+});
+
 describe("MemoryService write role enforcement (Phase 3)", () => {
   const CREDENTIAL_FINGERPRINT = "cred-fp-abc123";
 
