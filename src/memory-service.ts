@@ -135,9 +135,30 @@ export class MemoryService {
     return this.client.add({ ...mem0Input, metadata, user_id: userId });
   }
 
-  async search(input: Omit<SearchMemoryRequest, "filters">): Promise<unknown> {
+  /**
+   * Handoff Identity Safety (ADR-003 Section 19): `handoff_project_id`, when
+   * present, is composed into `filters` as an additional exact-match key —
+   * it never replaces or widens `user_id`, and no other caller-supplied
+   * filter key is ever accepted (arbitrary filter passthrough stays
+   * unsupported, matching the existing search() contract). Callers cannot
+   * override `user_id` because it is not part of this input type at all.
+   * When `handoff_project_id` is given, `classification: "TEMPORARY_CONTEXT"`
+   * is also added internally so a stray non-Handoff record that happens to
+   * carry the same locator (e.g. mis-tagged LONG_TERM_KNOWLEDGE) cannot
+   * surface as a Handoff result — this is a Gateway-side safety net, not a
+   * new classification concept.
+   */
+  async search(
+    input: Omit<SearchMemoryRequest, "filters"> & { handoff_project_id?: string | undefined },
+  ): Promise<unknown> {
+    const { handoff_project_id, ...rest } = input;
     const userId = await this.currentUserId();
-    return this.client.search({ ...input, filters: { user_id: userId } });
+    const filters: Record<string, unknown> = { user_id: userId };
+    if (handoff_project_id !== undefined) {
+      filters.handoff_project_id = handoff_project_id;
+      filters.classification = "TEMPORARY_CONTEXT";
+    }
+    return this.client.search({ ...rest, filters });
   }
 
   async get(memoryId: string): Promise<unknown> {

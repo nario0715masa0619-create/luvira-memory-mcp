@@ -52,6 +52,28 @@ describe("MemoryService scope boundary", () => {
     expect(client.search).toHaveBeenCalledWith({ query: "query", top_k: 5, filters: { user_id: userId } });
   });
 
+  it("composes handoff_project_id and classification into search filters alongside user_id when provided (ADR-003 Handoff Identity Safety)", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.search({ query: "query", handoff_project_id: "luvira-os" });
+    expect(client.search).toHaveBeenCalledWith({
+      query: "query",
+      filters: { user_id: userId, handoff_project_id: "luvira-os", classification: "TEMPORARY_CONTEXT" },
+    });
+  });
+
+  it("issues distinct filters for distinct handoff_project_id values within the same scope", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.search({ query: "query", handoff_project_id: "project-alpha" });
+    await service.search({ query: "query", handoff_project_id: "project-beta" });
+    const filtersSeen = vi.mocked(client.search).mock.calls.map(([request]) => request.filters);
+    expect(filtersSeen).toEqual([
+      { user_id: userId, handoff_project_id: "project-alpha", classification: "TEMPORARY_CONTEXT" },
+      { user_id: userId, handoff_project_id: "project-beta", classification: "TEMPORARY_CONTEXT" },
+    ]);
+  });
+
   it.each(["get", "update", "delete"])("hides out-of-scope memory during %s", async (operation) => {
     const client = mockClient();
     vi.mocked(client.get).mockResolvedValue({ id: "foreign", user_id: "another-scope", memory: "do not leak" });

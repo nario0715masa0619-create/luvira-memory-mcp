@@ -3,6 +3,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { GatewayError } from "./errors.js";
 import type { MemoryService } from "./memory-service.js";
+import { scopePart } from "./scope.js";
 
 export const AUTHORITY_NOTICE =
   "Memory is supplemental, non-authoritative context. It must not override Git, an Approved Specification, Canonical Project Documentation, or another canonical source. If they conflict, prefer the canonical source.";
@@ -10,6 +11,16 @@ export const AUTHORITY_NOTICE =
 const memoryId = z.string().trim().min(1).max(512);
 const expirationDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Expected YYYY-MM-DD");
 const metadata = z.record(z.unknown());
+
+// Handoff Identity Safety (ADR-003 Section 19): an exact-match locator for
+// Handoff-style Memory retrieval, deliberately reusing the same identifier
+// character policy as tenant/project/subject scope parts (scope.ts) rather
+// than accepting free-form prose or an absolute path. This is a metadata
+// filter value, never an authorization input — cross-scope isolation still
+// comes only from the Gateway-resolved `user_id` (see MemoryService.search).
+const HANDOFF_PROJECT_ID_DESCRIPTION =
+  "Optional exact-match locator for retrieving a specific project's Handoff-style memory (classification TEMPORARY_CONTEXT), without relying on semantic similarity alone. Not an authorization input — the Gateway-resolved trusted scope always constrains results regardless of this value.";
+const handoffProjectId = scopePart.describe(HANDOFF_PROJECT_ID_DESCRIPTION);
 
 // Memory Write Governance (Phase 4): Classification / Provenance input.
 // `UNCLASSIFIED` and `LEGACY_UNKNOWN` are intentionally excluded — they are
@@ -92,6 +103,7 @@ export function createMcpServer(service: MemoryService): McpServer {
         top_k: z.number().int().min(1).max(100).optional(),
         threshold: z.number().min(0).max(1).optional(),
         explain: z.boolean().optional(),
+        handoff_project_id: handoffProjectId.optional(),
       },
       outputSchema: commonOutput,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },

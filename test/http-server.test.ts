@@ -228,6 +228,35 @@ describe("Project-Aware Scope (Phase 2): per-request scope isolation", () => {
     expect(JSON.parse(String(init?.body)).filters).toEqual({ user_id: scopeToMem0UserId(scopeB) });
   });
 
+  it("composes handoff_project_id and classification into the real Mem0 search request body, without widening user_id (ADR-003 Handoff Identity Safety)", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    const url = await startServer(mem0ClientWithFetch(fetchMock), twoProjectRegistry);
+    await callToolAt(url, "token-a", "memory_search", { query: "q", handoff_project_id: "luvira-os" });
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(String(init?.body)).filters).toEqual({
+      user_id: scopeToMem0UserId(scopeA),
+      handoff_project_id: "luvira-os",
+      classification: "TEMPORARY_CONTEXT",
+    });
+  });
+
+  it("keeps two handoff_project_id values isolated by exact-match filter within the same shared scope (deterministic retrieval, not semantic ranking)", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    const sharedScopeRegistry = new TokenAuthRegistry([
+      { token: "token-shared", tenant: "test", project: "shared", subject: "owner", role: "read_write" },
+    ]);
+    const url = await startServer(mem0ClientWithFetch(fetchMock), sharedScopeRegistry);
+    await callToolAt(url, "token-shared", "memory_search", { query: "current status", handoff_project_id: "project-alpha" });
+    await callToolAt(url, "token-shared", "memory_search", { query: "current status", handoff_project_id: "project-beta" });
+
+    const filtersSeen = fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).filters);
+    expect(filtersSeen[0]).toMatchObject({ handoff_project_id: "project-alpha" });
+    expect(filtersSeen[1]).toMatchObject({ handoff_project_id: "project-beta" });
+    expect(filtersSeen[0]).toEqual(filtersSeen[0]);
+    expect(filtersSeen[0]).not.toEqual(filtersSeen[1]);
+  });
+
   it("rejects memory_get for a memory owned by a different project's scope as not_found", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify({ id: "mem-1", user_id: scopeToMem0UserId(scopeB), memory: "project-b content" }), { status: 200 }),

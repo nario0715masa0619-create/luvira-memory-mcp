@@ -78,6 +78,41 @@ describe("MCP tools", () => {
     expect(service.search).not.toHaveBeenCalled();
   });
 
+  it("forwards a valid handoff_project_id to the service alongside the existing show_expired default (ADR-003 Handoff Identity Safety)", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_search",
+      arguments: { query: "current status", handoff_project_id: "luvira-os" },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(service.search).toHaveBeenCalledWith({ query: "current status", handoff_project_id: "luvira-os", show_expired: false });
+  });
+
+  it("rejects a handoff_project_id that is not a safe identifier before service execution", async () => {
+    const { client, service } = await connected();
+    const result = await client.callTool({
+      name: "memory_search",
+      arguments: { query: "current status", handoff_project_id: "../not/a/valid/id" },
+    });
+    expect(result.isError).toBe(true);
+    expect(service.search).not.toHaveBeenCalled();
+  });
+
+  it("ignores an unrecognized source_project argument on memory_search — it is not a search input", async () => {
+    const { client, service } = await connected();
+    await client.callTool({
+      name: "memory_search",
+      arguments: { query: "current status", handoff_project_id: "luvira-os", source_project: "spoofed-project" },
+    });
+    expect(service.search).toHaveBeenCalledWith({ query: "current status", handoff_project_id: "luvira-os", show_expired: false });
+  });
+
+  it("strips a caller-supplied user_id from memory_search before it reaches the service", async () => {
+    const { client, service } = await connected();
+    await client.callTool({ name: "memory_search", arguments: { query: "current status", user_id: "attacker" } });
+    expect(service.search).toHaveBeenCalledWith({ query: "current status", show_expired: false });
+  });
+
   it("requires at least one memory_update field", async () => {
     const { client, service } = await connected();
     const result = await client.callTool({ name: "memory_update", arguments: { memory_id: "1" } });
