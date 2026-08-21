@@ -52,11 +52,20 @@ const authRegistryFileSchema = z.array(authRegistryEntrySchema).min(1).refine(
 /**
  * Loads the multi-token auth registry described in the Project-Aware Scope
  * design review (Phase 1). If `config.authRegistry.path` names an existing
- * file, its entries are the entire registry. Otherwise the Gateway falls
- * back to exactly one implicit entry built from the pre-existing
+ * file, its entries are the entire registry. Otherwise, when
+ * `config.authRegistry.required` is `false` (the default), the Gateway
+ * falls back to exactly one implicit entry built from the pre-existing
  * single-token configuration (`LUVIRA_MCP_API_KEY` / `LUVIRA_SCOPE_*`) with
  * `role: "read_write"` — this is what keeps every current single-token
  * deployment behaviorally unchanged without requiring a new file to exist.
+ *
+ * Post-MVP hardening: when `config.authRegistry.required` is `true`, a
+ * missing/unreadable registry file throws instead of falling back, failing
+ * the Gateway's startup closed rather than silently reverting every caller
+ * to one shared read_write credential. This only changes what happens when
+ * the file cannot be *read* — a file that exists but is malformed (bad
+ * JSON, a schema violation, a duplicate token) already fails closed below
+ * regardless of this flag, and that is unchanged.
  */
 export function loadAuthRegistry(
   config: AppConfig,
@@ -66,6 +75,12 @@ export function loadAuthRegistry(
   try {
     raw = readFile(config.authRegistry.path);
   } catch {
+    if (config.authRegistry.required) {
+      // Generic and deliberately silent on specifics: no path, token,
+      // scope, or credential value — matches the rest of this module's
+      // error surface (see GatewayError usage elsewhere in the Gateway).
+      throw new Error("Auth registry is required but unavailable.");
+    }
     return [
       {
         token: config.server.apiKey,

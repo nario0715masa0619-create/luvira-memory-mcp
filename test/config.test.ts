@@ -26,6 +26,18 @@ describe("configuration", () => {
   it("requires the Mem0 API key and all scope components", () => {
     expect(() => loadConfig({})).toThrow();
   });
+
+  it("defaults authRegistry.required to false when unset", () => {
+    expect(loadConfig(validEnv).authRegistry.required).toBe(false);
+  });
+
+  it("keeps authRegistry.required false when explicitly set to \"false\"", () => {
+    expect(loadConfig({ ...validEnv, LUVIRA_AUTH_REGISTRY_REQUIRED: "false" }).authRegistry.required).toBe(false);
+  });
+
+  it("sets authRegistry.required true when explicitly set to \"true\"", () => {
+    expect(loadConfig({ ...validEnv, LUVIRA_AUTH_REGISTRY_REQUIRED: "true" }).authRegistry.required).toBe(true);
+  });
 });
 
 describe("redaction", () => {

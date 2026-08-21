@@ -12,7 +12,7 @@ const config: AppConfig = {
     allowedOrigins: new Set(),
   },
   governance: { auditPath: "unused-in-this-test.jsonl" },
-  authRegistry: { path: "config/auth-registry.json" },
+  authRegistry: { path: "config/auth-registry.json", required: false },
 };
 
 function fileNotFound(): never {
@@ -61,6 +61,63 @@ describe("loadAuthRegistry", () => {
       { token: "token-a", tenant: "personal/../etc", project: "shared", subject: "owner", role: "read_write" },
     ]);
     expect(() => loadAuthRegistry(config, () => fileContents)).toThrow();
+  });
+});
+
+describe("loadAuthRegistry with authRegistry.required = true (Post-MVP hardening)", () => {
+  const requiredConfig: AppConfig = { ...config, authRegistry: { ...config.authRegistry, required: true } };
+
+  it("throws instead of falling back when the registry file is missing", () => {
+    expect(() => loadAuthRegistry(requiredConfig, fileNotFound)).toThrow();
+  });
+
+  it("does not return the single-token fallback shape when the file is missing", () => {
+    try {
+      loadAuthRegistry(requiredConfig, fileNotFound);
+      expect.unreachable("loadAuthRegistry should have thrown");
+    } catch (error) {
+      // Never silently returns the legacy read_write fallback entry.
+      expect(error).not.toEqual([
+        { token: "gateway-secret", tenant: "personal", project: "shared", subject: "owner", role: "read_write" },
+      ]);
+    }
+  });
+
+  it("throws instead of falling back when the registry file is unreadable (not just missing)", () => {
+    const unreadable = (): never => {
+      throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+    };
+    expect(() => loadAuthRegistry(requiredConfig, unreadable)).toThrow();
+  });
+
+  it("does not leak the credential, scope, or file path in the thrown error message", () => {
+    try {
+      loadAuthRegistry(requiredConfig, fileNotFound);
+      expect.unreachable("loadAuthRegistry should have thrown");
+    } catch (error) {
+      const message = (error as Error).message;
+      expect(message).not.toContain("gateway-secret");
+      expect(message).not.toContain("personal");
+      expect(message).not.toContain("owner");
+      expect(message).not.toContain(config.authRegistry.path);
+    }
+  });
+
+  it("loads normally from a valid registry file", () => {
+    const fileContents = JSON.stringify([
+      { token: "token-a", tenant: "personal", project: "shared", subject: "owner", role: "read_write" },
+    ]);
+    const entries = loadAuthRegistry(requiredConfig, () => fileContents);
+    expect(entries).toEqual([
+      { token: "token-a", tenant: "personal", project: "shared", subject: "owner", role: "read_write" },
+    ]);
+  });
+
+  it("still rejects a malformed registry file even though the file itself was readable", () => {
+    const fileContents = JSON.stringify([
+      { token: "token-a", tenant: "personal", project: "shared", subject: "owner", role: "admin" },
+    ]);
+    expect(() => loadAuthRegistry(requiredConfig, () => fileContents)).toThrow();
   });
 });
 

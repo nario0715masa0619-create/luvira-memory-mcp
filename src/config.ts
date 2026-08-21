@@ -24,6 +24,14 @@ const environmentSchema = z.object({
   // single implicit entry built from LUVIRA_MCP_API_KEY / LUVIRA_SCOPE_* below —
   // existing single-token deployments keep their current behavior unchanged.
   LUVIRA_AUTH_REGISTRY_PATH: nonEmpty.default("config/auth-registry.json"),
+  // Post-MVP hardening: opt-in fail-closed mode. Defaults to "false" so
+  // every existing single-token deployment (including this one, until
+  // explicitly opted in) keeps today's fallback-on-missing-file behavior —
+  // see loadAuthRegistry() in auth-registry.ts for what this flag gates.
+  // z.enum(...) rather than z.coerce.boolean(): the latter treats the
+  // literal string "false" as truthy (any non-empty string coerces to
+  // true), which would silently invert this flag's intent.
+  LUVIRA_AUTH_REGISTRY_REQUIRED: z.enum(["true", "false"]).default("false"),
 });
 
 export interface AppConfig {
@@ -48,6 +56,7 @@ export interface AppConfig {
   };
   authRegistry: {
     path: string;
+    required: boolean;
   };
 }
 
@@ -77,6 +86,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     },
     authRegistry: {
       path: parsed.LUVIRA_AUTH_REGISTRY_PATH,
+      required: parsed.LUVIRA_AUTH_REGISTRY_REQUIRED === "true",
     },
   };
 }

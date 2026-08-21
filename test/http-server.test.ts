@@ -27,7 +27,7 @@ const config: AppConfig = {
     allowedOrigins: new Set(["http://localhost:3080"]),
   },
   governance: { auditPath: "unused-in-this-test.jsonl" },
-  authRegistry: { path: "unused-in-this-test.json" },
+  authRegistry: { path: "unused-in-this-test.json", required: false },
 };
 
 const authRegistry = new TokenAuthRegistry([
