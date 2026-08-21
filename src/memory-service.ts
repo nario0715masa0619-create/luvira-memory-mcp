@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ClientRole } from "./auth-registry.js";
 import { evaluateAutomationPolicy, REQUIRES_EXPLICIT_CLASSIFICATIONS } from "./governance/automation-policy.js";
 import { GatewayError, type GatewayErrorCode } from "./errors.js";
 import type { AuditSink } from "./governance/audit-sink.js";
@@ -19,6 +20,9 @@ const RESERVED_METADATA_KEYS = new Set(["user_id", "agent_id", "run_id"]);
 const GOVERNANCE_BLOCKED_MESSAGE = "Memory write blocked by governance policy.";
 const AUDIT_UNAVAILABLE_MESSAGE = "Memory write could not be audited.";
 const INFER_NOT_ALLOWED_MESSAGE = "Memory write with infer=true is not allowed by governance policy.";
+// Deliberately generic — no project name, client name, or role detail, so
+// this is safe to return verbatim to any caller regardless of scope.
+const ROLE_FORBIDDEN_MESSAGE = "Memory write is not permitted for this credential.";
 const DEFAULT_CLASSIFICATION: MemoryClassification = "UNCLASSIFIED";
 
 /** Classifications a caller may never persist, regardless of explicit-request or content. */
@@ -52,13 +56,21 @@ export class MemoryService {
     private readonly client: Mem0Client,
     private readonly scopeResolver: ScopeResolver,
     private readonly auditSink: AuditSink,
+    // Project-Aware Scope (Phase 3): both default to the pre-Phase-3
+    // behavior (unrestricted write) so every existing caller of this
+    // constructor — tests included — keeps working unchanged. The one real
+    // production call site (http-server.ts) always passes the request's
+    // actual resolved values.
+    private readonly role: ClientRole = "read_write",
+    private readonly credentialFingerprint: string = "",
   ) {}
 
   async add(input: Omit<AddMemoryRequest, "user_id"> & GovernanceWriteFields): Promise<unknown> {
     const { classification, source_type, explicit_user_request, source_project, source_client, ...mem0Input } = input;
     const userId = await this.currentUserId();
-    validateMetadata(mem0Input.metadata);
     const resolvedClassification = classification ?? DEFAULT_CLASSIFICATION;
+    await this.enforceWriteRole("ADD", userId, resolvedClassification);
+    validateMetadata(mem0Input.metadata);
     const writeIntent = writeIntentFor(explicit_user_request);
 
     // Memory Governance MVP (AR-1): `infer=true` lets Mem0 opaquely
@@ -136,8 +148,9 @@ export class MemoryService {
   async update(memoryId: string, input: UpdateMemoryRequest & GovernanceWriteFields): Promise<unknown> {
     const { classification, source_type, explicit_user_request, source_project, source_client, ...mem0Input } = input;
     const userId = await this.currentUserId();
-    validateMetadata(mem0Input.metadata);
     const declaredClassification = classification ?? DEFAULT_CLASSIFICATION;
+    await this.enforceWriteRole("UPDATE", userId, declaredClassification);
+    validateMetadata(mem0Input.metadata);
     const writeIntent = writeIntentFor(explicit_user_request);
 
     // Secret detection and the SECRET/CUSTOMER_CONFIDENTIAL restriction do
@@ -208,6 +221,7 @@ export class MemoryService {
 
   async delete(memoryId: string, options: { explicitUserRequest?: boolean | undefined } = {}): Promise<unknown> {
     const userId = await this.currentUserId();
+    await this.enforceWriteRole("DELETE", userId, DEFAULT_CLASSIFICATION);
     const existing = await this.getOwned(memoryId, userId);
     const existingClassification = extractClassification(existing);
     const writeIntent = writeIntentFor(options.explicitUserRequest);
@@ -241,6 +255,32 @@ export class MemoryService {
 
   private async currentUserId(): Promise<string> {
     return scopeToMem0UserId(await this.scopeResolver.resolve());
+  }
+
+  /**
+   * Project-Aware Scope (Phase 3): the first check in every write path,
+   * before metadata validation, secret detection, or any Mem0 call
+   * (including the ownership GET that update/delete would otherwise issue
+   * next) — a read_only credential never reaches Mem0 at all. Independent
+   * of and never a substitute for the write-governance checks that follow
+   * it for a role that does pass: see evaluateEarlyGates /
+   * evaluateWriteGovernance / the DELETE protection below.
+   */
+  private async enforceWriteRole(
+    operation: GovernanceWriteOperation,
+    userId: string,
+    classification: MemoryClassification,
+  ): Promise<void> {
+    if (this.role === "read_write") return;
+    await this.auditAndMaybeThrow({
+      operation,
+      userId,
+      classification,
+      decision: "BLOCK",
+      reasonCodes: ["role_forbidden_write"],
+      errorCode: "role_forbidden_write",
+      errorMessage: ROLE_FORBIDDEN_MESSAGE,
+    });
   }
 
   private async getOwned(memoryId: string, expectedUserId: string): Promise<unknown> {
@@ -344,6 +384,12 @@ export class MemoryService {
       decision: params.decision,
       reasonCodes: params.reasonCodes,
       scopeFingerprint: scopeFingerprint(params.userId),
+      // Project-Aware Scope (Phase 3): the authenticated credential's role
+      // and fingerprint, on every write-governance audit event — not only
+      // role_forbidden_write ones — so any event can answer "which
+      // credential, with what role, made this call" without a secret.
+      role: this.role,
+      credentialFingerprint: this.credentialFingerprint,
       ...(params.contentHashInput !== undefined ? { contentHash: hashForAudit(params.contentHashInput) } : {}),
       ...(params.memoryId !== undefined ? { memoryId: params.memoryId } : {}),
       ...(params.sourceType !== undefined ? { sourceType: params.sourceType } : {}),

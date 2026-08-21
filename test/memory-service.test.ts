@@ -878,3 +878,126 @@ describe("MemoryService DELETE governance (Memory Governance MVP, Section 10)", 
     expect(audit.record).not.toHaveBeenCalled();
   });
 });
+
+describe("MemoryService write role enforcement (Phase 3)", () => {
+  const CREDENTIAL_FINGERPRINT = "cred-fp-abc123";
+
+  function readOnlyService(client: Mem0Client, audit: AuditSink): MemoryService {
+    return new MemoryService(client, new StaticScopeResolver(scope), audit, "read_only", CREDENTIAL_FINGERPRINT);
+  }
+
+  function readWriteService(client: Mem0Client, audit: AuditSink): MemoryService {
+    return new MemoryService(client, new StaticScopeResolver(scope), audit, "read_write", CREDENTIAL_FINGERPRINT);
+  }
+
+  it("allows memory_search for a read_only credential", async () => {
+    const client = mockClient();
+    const service = readOnlyService(client, mockAuditSink());
+    await expect(service.search({ query: "q" })).resolves.toBeDefined();
+    expect(client.search).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows memory_get for a read_only credential", async () => {
+    const client = mockClient();
+    const service = readOnlyService(client, mockAuditSink());
+    await expect(service.get("owned")).resolves.toBeDefined();
+    expect(client.get).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["add", "update", "delete"])("blocks memory_%s for a read_only credential", async (operation) => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = readOnlyService(client, audit);
+    const call = operation === "add"
+      ? service.add({ messages: [{ role: "user", content: "x" }] })
+      : operation === "update"
+        ? service.update("owned", { text: "x" })
+        : service.delete("owned");
+    await expect(call).rejects.toMatchObject({ code: "role_forbidden_write" } satisfies Partial<GatewayError>);
+  });
+
+  it.each(["add", "update", "delete"])("makes zero Mem0 calls when blocking memory_%s for a read_only credential", async (operation) => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = readOnlyService(client, audit);
+    const call = operation === "add"
+      ? service.add({ messages: [{ role: "user", content: "x" }] })
+      : operation === "update"
+        ? service.update("owned", { text: "x" })
+        : service.delete("owned");
+    await expect(call).rejects.toBeDefined();
+    expect(client.add).not.toHaveBeenCalled();
+    expect(client.get).not.toHaveBeenCalled();
+    expect(client.update).not.toHaveBeenCalled();
+    expect(client.delete).not.toHaveBeenCalled();
+  });
+
+  it.each(["add", "update", "delete"])("lets a read_write credential pass the role gate for memory_%s", async (operation) => {
+    const client = mockClient();
+    const audit = mockAuditSink();
+    const service = readWriteService(client, audit);
+    const call = operation === "add"
+      ? service.add({ messages: [{ role: "user", content: "x" }] })
+      : operation === "update"
+        ? service.update("owned", { text: "x" })
+        : service.delete("owned");
+    await expect(call).resolves.toBeDefined();
+    expect(audit.events.some((event) => event.reasonCodes.includes("role_forbidden_write"))).toBe(false);
+  });
+
+  it("records role_forbidden_write as the sole reason code on a role BLOCK", async () => {
+    const audit = mockAuditSink();
+    const service = readOnlyService(mockClient(), audit);
+    await expect(service.add({ messages: [{ role: "user", content: "x" }] })).rejects.toBeDefined();
+    expect(audit.events[0]).toMatchObject({ decision: "BLOCK", reasonCodes: ["role_forbidden_write"] });
+  });
+
+  it("records role and credentialFingerprint on both ALLOW and BLOCK audit events", async () => {
+    const allowAudit = mockAuditSink();
+    await readWriteService(mockClient(), allowAudit).add({ messages: [{ role: "user", content: "x" }] });
+    expect(allowAudit.events[0]).toMatchObject({ role: "read_write", credentialFingerprint: CREDENTIAL_FINGERPRINT });
+
+    const blockAudit = mockAuditSink();
+    await expect(readOnlyService(mockClient(), blockAudit).add({ messages: [{ role: "user", content: "x" }] })).rejects.toBeDefined();
+    expect(blockAudit.events[0]).toMatchObject({ role: "read_only", credentialFingerprint: CREDENTIAL_FINGERPRINT });
+  });
+
+  it("never includes a raw token in the client-facing role denial error", async () => {
+    const service = readOnlyService(mockClient(), mockAuditSink());
+    await expect(service.add({ messages: [{ role: "user", content: "x" }] })).rejects.toMatchObject({
+      message: "Memory write is not permitted for this credential.",
+    } satisfies Partial<GatewayError>);
+  });
+
+  it("omits contentHash and memoryId from a role BLOCK audit event", async () => {
+    const audit = mockAuditSink();
+    await expect(readOnlyService(mockClient(), audit).update("owned", { text: "x" })).rejects.toBeDefined();
+    expect(audit.events[0]).not.toHaveProperty("contentHash");
+    expect(audit.events[0]).not.toHaveProperty("memoryId");
+  });
+
+  it("fails closed — never calling Mem0 — when the audit sink itself fails during a role BLOCK", async () => {
+    const client = mockClient();
+    const service = readOnlyService(client, failingAuditSink());
+    await expect(service.add({ messages: [{ role: "user", content: "x" }] })).rejects.toMatchObject({
+      code: "governance_audit_unavailable",
+    } satisfies Partial<GatewayError>);
+    expect(client.add).not.toHaveBeenCalled();
+  });
+
+  it("is not affected by a spoofed source_client field", async () => {
+    const audit = mockAuditSink();
+    const service = readOnlyService(mockClient(), audit);
+    await expect(
+      service.add({ messages: [{ role: "user", content: "x" }], source_client: "claude-code" }),
+    ).rejects.toMatchObject({ code: "role_forbidden_write" } satisfies Partial<GatewayError>);
+  });
+
+  it("is not affected by a spoofed source_project field", async () => {
+    const audit = mockAuditSink();
+    const service = readOnlyService(mockClient(), audit);
+    await expect(
+      service.add({ messages: [{ role: "user", content: "x" }], source_project: "some-other-project" }),
+    ).rejects.toMatchObject({ code: "role_forbidden_write" } satisfies Partial<GatewayError>);
+  });
+});

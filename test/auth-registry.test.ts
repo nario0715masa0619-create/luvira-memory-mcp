@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadAuthRegistry, TokenAuthRegistry } from "../src/auth-registry.js";
+import { loadAuthRegistry, toRequestContext, TokenAuthRegistry } from "../src/auth-registry.js";
 import type { AppConfig } from "../src/config.js";
 
 const config: AppConfig = {
@@ -84,5 +84,30 @@ describe("TokenAuthRegistry", () => {
 
   it("returns undefined for the empty string", () => {
     expect(registry.resolve("")).toBeUndefined();
+  });
+});
+
+describe("toRequestContext (Phase 3)", () => {
+  const entry = { token: "super-secret-token-value", tenant: "personal", project: "shared", subject: "owner", role: "read_only" as const };
+
+  it("carries scope and role unchanged", () => {
+    const context = toRequestContext(entry);
+    expect(context.scope).toEqual({ tenant: "personal", project: "shared", subject: "owner" });
+    expect(context.role).toBe("read_only");
+  });
+
+  it("never surfaces the raw token as the credential fingerprint", () => {
+    const context = toRequestContext(entry);
+    expect(context.credentialFingerprint).not.toBe(entry.token);
+    expect(context.credentialFingerprint).not.toContain(entry.token);
+  });
+
+  it("derives a deterministic credential fingerprint for the same token", () => {
+    expect(toRequestContext(entry).credentialFingerprint).toBe(toRequestContext(entry).credentialFingerprint);
+  });
+
+  it("derives a different credential fingerprint for a different token", () => {
+    const other = { ...entry, token: "a-completely-different-token-value" };
+    expect(toRequestContext(entry).credentialFingerprint).not.toBe(toRequestContext(other).credentialFingerprint);
   });
 });

@@ -51,10 +51,16 @@ const sampleAuditEvent: GovernanceAuditEvent = {
   writeIntent: "EXPLICIT_REPORTED",
   sourceProject: "luvira-memory-mcp",
   sourceClient: "claude-code",
+  role: "read_write",
+  credentialFingerprint: "fingerprint",
 };
 
 const FORBIDDEN_AUDIT_FIELD_PATTERN = /text|content$|raw|credential|secret|password|authorization|token/i;
-const ALLOWED_CONTENT_FIELD_EXCEPTION = new Set(["contentHash"]);
+// contentHash and credentialFingerprint both trip the pattern above by name
+// (it exists to catch fields that could carry raw sensitive values) but are
+// deliberately safe: each is a one-way hash of something dangerous to log
+// raw, never the value itself. See memory-service.ts / auth-registry.ts.
+const ALLOWED_CONTENT_FIELD_EXCEPTION = new Set(["contentHash", "credentialFingerprint"]);
 
 describe("governance canonical types", () => {
   it("declares the required classification set with no duplicates", () => {

@@ -54,11 +54,10 @@ export function createGatewayHttpServer(
         sendJson(response, 401, { error: "unauthorized" });
         return;
       }
-      // Project-Aware Scope (Phase 2): the resolved entry's scope becomes
-      // this request's — and only this request's — MemoryScope. `token`
-      // never leaves resolveAuthEntry/authEntry; toRequestContext strips it
-      // before anything else touches the result. `role` is carried but
-      // unused — no tool checks it yet (Phase 3).
+      // Project-Aware Scope (Phase 2/3): the resolved entry's scope, role,
+      // and credential fingerprint become this request's — and only this
+      // request's — values. `token` never leaves resolveAuthEntry/authEntry;
+      // toRequestContext strips it before anything else touches the result.
       const requestContext = toRequestContext(authEntry);
       if (!new Set(["GET", "POST", "DELETE"]).has(request.method ?? "")) {
         response.setHeader("Allow", "GET, POST, DELETE");
@@ -70,9 +69,16 @@ export function createGatewayHttpServer(
       // A fresh StaticScopeResolver + MemoryService per request — not a
       // process-global resolver reused across requests — is what makes two
       // concurrent requests presenting different tokens resolve to
-      // different Mem0 user_ids. No mutable shared state is written here.
+      // different Mem0 user_ids and different write roles. No mutable
+      // shared state is written here.
       const requestScopeResolver = new StaticScopeResolver(requestContext.scope);
-      const requestService = new MemoryService(mem0, requestScopeResolver, auditSink);
+      const requestService = new MemoryService(
+        mem0,
+        requestScopeResolver,
+        auditSink,
+        requestContext.role,
+        requestContext.credentialFingerprint,
+      );
       const mcpServer = createMcpServer(requestService);
       const transport = new StreamableHTTPServerTransport({
         enableJsonResponse: true,

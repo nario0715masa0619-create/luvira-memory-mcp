@@ -3,7 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import type { MemoryScope } from "./scope.js";
-import { scopePart } from "./scope.js";
+import { scopeFingerprint, scopePart } from "./scope.js";
 
 /**
  * Project-Aware Scope (Phase 1): a client's role determines whether write
@@ -104,21 +104,28 @@ export class TokenAuthRegistry {
 }
 
 /**
- * Project-Aware Scope (Phase 2): what a resolved `AuthRegistryEntry`
+ * Project-Aware Scope (Phase 2/3): what a resolved `AuthRegistryEntry`
  * contributes to request handling once authentication has already
  * succeeded. Deliberately narrower than `AuthRegistryEntry` — `token` never
  * appears here, so nothing downstream of `toRequestContext` can log,
- * serialize, or otherwise leak the raw credential. `role` is carried
- * unchanged for Phase 3; no Phase 2 code path reads it.
+ * serialize, or otherwise leak the raw credential. `role` is now enforced
+ * by `MemoryService` (Phase 3); `credentialFingerprint` exists so an audit
+ * event can identify which credential acted without ever holding the token.
  */
 export interface AuthenticatedRequestContext {
   readonly scope: MemoryScope;
   readonly role: ClientRole;
+  readonly credentialFingerprint: string;
 }
 
 export function toRequestContext(entry: AuthRegistryEntry): AuthenticatedRequestContext {
   return {
     scope: { tenant: entry.tenant, project: entry.project, subject: entry.subject },
     role: entry.role,
+    // Reuses scope.ts's short one-way hash (sha256, truncated) — the same
+    // construction as scopeFingerprint, applied to a credential instead of
+    // a scope string. Not a rename to a credential-specific name: the
+    // operation ("deterministic, non-reversible, short") is identical.
+    credentialFingerprint: scopeFingerprint(entry.token),
   };
 }

@@ -156,7 +156,10 @@ export type GovernanceReasonCode =
   // Future external policy engine (Phase 10)
   | "policy_unavailable"
   // Project-aware scope (Phase 8, AR-3)
-  | "project_scope_unresolved";
+  | "project_scope_unresolved"
+  // Project-Aware Scope (Phase 3): the authenticated credential's role
+  // (from the auth registry, never a client self-assertion) is read_only.
+  | "role_forbidden_write";
 
 /**
  * Confidence tier for pattern-based secret detection (AR-4). Not a claim of
@@ -245,4 +248,19 @@ export interface GovernanceAuditEvent {
   readonly sourceProject?: string;
   /** Provenance only (Phase 4) — never a policy-branching input. See {@link GovernanceContext}. */
   readonly sourceClient?: string;
+  /**
+   * Project-Aware Scope (Phase 3): the authenticated credential's role,
+   * resolved from the auth registry — never a client self-assertion, unlike
+   * every other field on this event. Inlined as the literal union (rather
+   * than importing `ClientRole` from `auth-registry.ts`) so the governance
+   * module does not depend on the auth-registry module; the two must stay
+   * the same two values.
+   */
+  readonly role: "read_only" | "read_write";
+  /**
+   * Project-Aware Scope (Phase 3): one-way hash of the Bearer token that
+   * authenticated this request — never the raw token. Identifies which
+   * credential made a call without the audit log ever holding a secret.
+   */
+  readonly credentialFingerprint: string;
 }

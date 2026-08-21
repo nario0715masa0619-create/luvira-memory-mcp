@@ -297,3 +297,58 @@ describe("Project-Aware Scope (Phase 2): per-request scope isolation", () => {
     expect(JSON.parse(String(init?.body)).user_id).toBe(scopeToMem0UserId(config.scope));
   });
 });
+
+describe("Project-Aware Scope (Phase 3): role enforcement", () => {
+  const roleRegistry = new TokenAuthRegistry([
+    { token: "token-readonly", tenant: "test", project: "project-a", subject: "user-1", role: "read_only" },
+    { token: "token-readwrite", tenant: "test", project: "project-b", subject: "user-1", role: "read_write" },
+  ]);
+
+  it("allows memory_search for the read_only token", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    const url = await startServer(mem0ClientWithFetch(fetchMock), roleRegistry);
+    const result = await callToolAt(url, "token-readonly", "memory_search", { query: "q" });
+
+    expect(result.isError).not.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows memory_get for the read_only token", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ id: "mem-1", user_id: scopeToMem0UserId({ tenant: "test", project: "project-a", subject: "user-1" }) }), { status: 200 }),
+    );
+    const url = await startServer(mem0ClientWithFetch(fetchMock), roleRegistry);
+    const result = await callToolAt(url, "token-readonly", "memory_get", { memory_id: "mem-1" });
+
+    expect(result.isError).not.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["memory_add", "memory_update", "memory_delete"])("blocks %s for the read_only token before reaching Mem0", async (toolName) => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { status: 200 }));
+    const url = await startServer(mem0ClientWithFetch(fetchMock), roleRegistry);
+    const args = toolName === "memory_add"
+      ? { messages: [{ role: "user", content: "hi" }] }
+      : toolName === "memory_update"
+        ? { memory_id: "mem-1", text: "x" }
+        : { memory_id: "mem-1" };
+    const result = await callToolAt(url, "token-readonly", toolName, args);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ ok: false, error: { code: "role_forbidden_write" } });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("lets the read_write token reach the write handler and call Mem0", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    const url = await startServer(mem0ClientWithFetch(fetchMock), roleRegistry);
+    const result = await callToolAt(url, "token-readwrite", "memory_add", { messages: [{ role: "user", content: "hi" }] });
+
+    expect(result.isError).not.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(String(init?.body)).user_id).toBe(
+      scopeToMem0UserId({ tenant: "test", project: "project-b", subject: "user-1" }),
+    );
+  });
+});

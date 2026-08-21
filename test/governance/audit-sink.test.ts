@@ -21,6 +21,8 @@ function event(overrides: Partial<GovernanceAuditEvent> = {}): GovernanceAuditEv
     decision: "ALLOW",
     reasonCodes: [],
     scopeFingerprint: "scope-fingerprint",
+    role: "read_write",
+    credentialFingerprint: "credential-fingerprint",
     ...overrides,
   };
 }

@@ -25,7 +25,12 @@ export type GatewayErrorCode =
   | "automation_policy_restricted"
   // Memory Governance MVP: `infer=true` was rejected because Mem0's
   // resulting opaque mutation cannot be audited before it happens.
-  | "opaque_upstream_mutation_not_allowed";
+  | "opaque_upstream_mutation_not_allowed"
+  // Project-Aware Scope (Phase 3): the authenticated credential's role is
+  // read_only. Independent of every other write-governance check above —
+  // reachable even for a caller whose content and classification would
+  // otherwise be ALLOWed.
+  | "role_forbidden_write";
 
 export class GatewayError extends Error {
   constructor(
