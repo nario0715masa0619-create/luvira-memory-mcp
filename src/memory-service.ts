@@ -192,7 +192,18 @@ export class MemoryService {
         source_client,
       })
       : undefined;
-    return this.client.add({ ...mem0Input, metadata, user_id: userId });
+
+    // Memory Governance MVP (AR-1 / Gateway-owned safe default): explicit
+    // `infer=true` is already blocked above, so by this point the caller's
+    // own value (omitted, or `false`) never reaches Mem0 — `infer` is always
+    // sent as `false`. Upstream Mem0 defaults an omitted `infer` to `true`
+    // (LLM-based fact extraction, confirmed in mem0/memory/main.py and the
+    // OpenAPI description "Defaults to True."), which the earlier BLOCK
+    // cannot see or audit; omission is not equivalent to `false` on Mem0's
+    // side, so the Gateway must not rely on a caller (any model or harness)
+    // remembering to pass it. This is a Gateway-wide contract for every
+    // memory_add, not a Handoff-specific carve-out.
+    return this.client.add({ ...mem0Input, infer: false, metadata, user_id: userId });
   }
 
   /**

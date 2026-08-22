@@ -41,6 +41,7 @@ describe("MemoryService scope boundary", () => {
     await service.add({ messages: [{ role: "user", content: "content" }] });
     expect(client.add).toHaveBeenCalledWith({
       messages: [{ role: "user", content: "content" }],
+      infer: false,
       user_id: userId,
     });
   });
@@ -433,6 +434,7 @@ describe("MemoryService classification / provenance governance (Phase 4)", () =>
     expect(audit.events[0]?.classification).toBe("UNCLASSIFIED");
     expect(client.add).toHaveBeenCalledWith({
       messages: [{ role: "user", content: "plain note" }],
+      infer: false,
       user_id: userId,
     });
   });
@@ -640,13 +642,32 @@ describe("MemoryService infer=true governance (Memory Governance MVP, Section 8)
     expect(client.add).toHaveBeenCalledWith(expect.objectContaining({ infer: false }));
   });
 
-  it("preserves existing behavior when infer is omitted", async () => {
+  it("Gateway-owned safe default (AR-1): defaults infer to false when the caller omits it, rather than letting Mem0's own infer=true default apply", async () => {
     const client = mockClient();
     const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
     await service.add({ messages: [{ role: "user", content: "safe content" }] });
-    expect(client.add).toHaveBeenCalledTimes(1);
-    const [call] = vi.mocked(client.add).mock.calls[0]!;
-    expect(call).not.toHaveProperty("infer");
+    expect(client.add).toHaveBeenCalledWith(expect.objectContaining({ infer: false }));
+  });
+
+  it("Gateway-wide default, not a Handoff-specific carve-out: TEMPORARY_CONTEXT with handoff_project_id and infer omitted still sends infer:false", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.add({
+      messages: [{ role: "user", content: "safe content" }],
+      classification: "TEMPORARY_CONTEXT",
+      metadata: { handoff_project_id: "infer-default-check" },
+    });
+    expect(client.add).toHaveBeenCalledWith(expect.objectContaining({ infer: false }));
+  });
+
+  it("Gateway-wide default, not a Handoff-specific carve-out: LONG_TERM_KNOWLEDGE with infer omitted also sends infer:false", async () => {
+    const client = mockClient();
+    const service = new MemoryService(client, new StaticScopeResolver(scope), mockAuditSink());
+    await service.add({
+      messages: [{ role: "user", content: "safe content" }],
+      classification: "LONG_TERM_KNOWLEDGE",
+    });
+    expect(client.add).toHaveBeenCalledWith(expect.objectContaining({ infer: false }));
   });
 
   it("fails closed on AuditSink failure for an infer=true block: upstream add is never called", async () => {

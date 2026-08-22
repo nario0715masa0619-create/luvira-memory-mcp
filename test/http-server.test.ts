@@ -199,6 +199,15 @@ describe("Project-Aware Scope (Phase 2): per-request scope isolation", () => {
     expect(JSON.parse(String(init?.body)).user_id).toBe(scopeToMem0UserId(scopeA));
   });
 
+  it("sends the real Mem0 request body with infer:false when the caller omits infer (Gateway-owned safe default, AR-1)", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(okAddResponse());
+    const url = await startServer(mem0ClientWithFetch(fetchMock), twoProjectRegistry);
+    await callToolAt(url, "token-a", "memory_add", { messages: [{ role: "user", content: "hi" }] });
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(String(init?.body))).toMatchObject({ infer: false });
+  });
+
   it("resolves token B's memory_add to project-b's Mem0 user_id, on the same running Gateway process", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(okAddResponse());
     const url = await startServer(mem0ClientWithFetch(fetchMock), twoProjectRegistry);
